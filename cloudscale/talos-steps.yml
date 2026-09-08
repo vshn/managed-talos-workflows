@@ -202,7 +202,19 @@ spells:
     - name: seed_kubeconfig
     - name: jumphost_proxy_string
     - name: cacppt_image
+      description: |-
+        This input controls whether the spell patches the CAPI Talos control plane provider.
+
+        Use `none` if you don't need a custom provider build.
+
+        Provide a valid container image if you need a custom provider build.
     - name: capcs_image
+      description: |-
+        This input controls whether the spell patches the CAPI cloudscale provider.
+
+        Use `none` if you don't need a custom provider build.
+
+        Provide a valid container image if you need a custom provider build.
   run: |
     set -euo pipefail
 
