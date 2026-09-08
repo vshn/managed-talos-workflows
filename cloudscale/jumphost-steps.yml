@@ -101,6 +101,7 @@ spells:
       "permissions": "0600"
     }]' "${GANDALF_SPELLBOOK_DIR}/manifests/cloud-init.yaml")
     server=$(jq -c -r -n \
+      --arg cluster_id "$INPUT_commodore_cluster_id" \
       --arg subnet_uuid "$INPUT_cloudscale_subnet_uuid" \
       --arg csp_region "$INPUT_csp_region" \
       --arg cluster_domain "${INPUT_commodore_cluster_id}.${INPUT_base_domain}" \
@@ -125,7 +126,10 @@ spells:
           }
         ],
         "ssh_keys": [ $ssh_public_key ],
-        "user_data": $user_data
+        "user_data": $user_data,
+        "tags": {
+          "cluster-id": $cluster_id
+        }
       }')
 
     echo "Creating jumphost VM..."

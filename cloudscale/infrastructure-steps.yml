@@ -217,12 +217,12 @@ spells:
     auth_header="Authorization: Bearer ${INPUT_cloudscale_token}"
     api_reverse_ptr="api.${INPUT_commodore_cluster_id}.${INPUT_base_domain}"
     existing_vip_resp=$(curl -fsSL -H"$auth_header" \
-      "https://api.cloudscale.ch/v1/floating-ips?tag:cluster-id=${INPUT_commodore_cluster_id}")
+      "https://api.cloudscale.ch/v1/floating-ips?tag:cluster_id=${INPUT_commodore_cluster_id}")
     existing_api_vip=$(jq -r -n --argjson resp "$existing_vip_resp" \
       --arg reverse_ptr "$api_reverse_ptr" \
       '$resp[]|select(.reverse_ptr == $reverse_ptr)|.network//""')
     if [ -n "$existing_api_vip" ]; then
-      echo "Found a floating IP with tag cluster-id=${INPUT_commodore_cluster_id} and reverse PTR ${api_reverse_ptr}: $existing_api_vip. Using it for Talos API..."
+      echo "Found a floating IP with tag cluster_id=${INPUT_commodore_cluster_id} and reverse PTR ${api_reverse_ptr}: $existing_api_vip. Using it for Talos API..."
       env -i "talos_api_vip=${existing_api_vip}" >> "$OUTPUT"
     else
       echo "Allocating floating IP for Talos K8s API..."
@@ -237,7 +237,7 @@ spells:
           "reverse_ptr": $reverse_ptr,
           "prefix_length": 32,
           "tags": {
-            "cluster-id": $cluster_id
+            "cluster_id": $cluster_id
           }
         }')
       api_vip_resp=$(curl -fsSL -H"$auth_header" https://api.cloudscale.ch/v1/floating-ips \
@@ -253,7 +253,7 @@ spells:
       --arg reverse_ptr "$ingress_reverse_ptr" \
       '$resp[]|select(.reverse_ptr == $reverse_ptr)|.network//""')
     if [ -n "$existing_ingress_vip" ]; then
-      echo "Found a floating IP with tag cluster-id=${INPUT_commodore_cluster_id} and reverse PTR ${ingress_reverse_ptr}: $existing_ingress_vip. Using it for Talos Ingress..."
+      echo "Found a floating IP with tag cluster_id=${INPUT_commodore_cluster_id} and reverse PTR ${ingress_reverse_ptr}: $existing_ingress_vip. Using it for Talos Ingress..."
       env -i "talos_ingress_vip=${existing_ingress_vip}" >> "$OUTPUT"
       exit 0
     fi
@@ -270,7 +270,7 @@ spells:
         "reverse_ptr": $reverse_ptr,
         "prefix_length": 32,
         "tags": {
-          "cluster-id": $cluster_id
+          "cluster_id": $cluster_id
         }
       }')
     ingress_vip_resp=$(curl -fsSL -H"$auth_header" https://api.cloudscale.ch/v1/floating-ips \
