@@ -45,7 +45,7 @@ spells:
     kubectl wait --for=delete pv --all --timeout=120s
     echo "✅ All PVs deleted."
 
-- match: Finally I delete the cluster backups and cloudscale objects user
+- match: And I delete the cluster backups and cloudscale objects user
   description: |-
     This step deletes the cluster's associated backup buckets from cloudscale.
   inputs:
@@ -147,3 +147,25 @@ spells:
     # Delete object user
     echo "Deleting object user ..."
     curl -i -H "Authorization: Bearer ${INPUT_cloudscale_token}" -X DELETE "$(echo "$response" | jq -r '.href')"
+
+- match: And I delete the cluster's API token
+  description: |-
+    This step deletes the cluster's associated cloudscale API token from cloudscale.
+  inputs:
+  - name: cloudscale_token
+  run: |
+    set -euo pipefail
+    echo '##############################################################'
+    echo '#                                                            #'
+    echo '#   Please delete the cloudscale token associated with this  #'
+    echo '#   cluster via the cloudscale console.                      #'
+    echo '#                                                            #'
+    echo '##############################################################'
+
+    echo -n "Checking for deletion of cloudscale token ..."
+    while [[ $(curl -sH "Authorization: Bearer ${INPUT_cloudscale_token}" https://api.cloudscale.ch/v1/flavors -o /dev/null -w"%{http_code}") != 401 ]]
+    do
+      echo -n .
+      sleep 3
+    done
+    echo " Success."

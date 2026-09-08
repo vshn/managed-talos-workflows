@@ -1,6 +1,7 @@
 Given I have all prerequisites installed
 And I select the cluster to decommission
 And a cloudscale API token
+Then I confirm cluster deletion
 Then I set up a Kind cluster
 And I set up an SSH jumphost in the cluster network
 And I wait for the jumphost to become ready
@@ -18,4 +19,8 @@ And I delete the cloudscale floating IPs
 And I delete the cloudscale router
 And I delete the cloudscale subnet and private network
 And I delete the cloudscale S3 buckets
-Finally I delete the cluster backups and cloudscale objects user
+And I delete the cluster backups and cloudscale objects user
+And I delete the cluster's API token
+Then I delete the cluster's Vault secrets
+And I delete the cluster from Lieutenant
+And I delete the Keycloak service

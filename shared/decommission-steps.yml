@@ -47,6 +47,24 @@ spells:
     export KUBECONFIG="${INPUT_commodore_cluster_id}.kubeconfig"
     if ! kubectl get nodes; then echo "❌ Unable to access cluster with downloaded kubeconfig, check manually."; else echo "✅ Cluster access works with downloaded kubeconfig."; fi
 
+- match: Then I confirm cluster deletion
+  description: |-
+    This step asks you to confirm with 4 eyes whether this cluster is really to be deleted.
+  inputs:
+  - name: commodore_cluster_id
+  - name: 4_eye_confirmation
+    description: |-
+      Please confirm the commodore cluster ID of the cluster you wish to delete.
+
+      Confirm this cluster ID according to the 4-eye principle. You and one colleague should agree on the cluster that is to be deleted.
+  run: |
+    set -euo pipefail
+    if [[ "${INPUT_commodore_cluster_id}" != "${INPUT_4_eye_confirmation}" ]]
+    then
+      echo "Cluster domain and confirmation do not match."
+      exit 1
+    fi
+
 - match: Then I disable ArgoCD on the cluster
   description: |-
     Disable Project Syn ArgoCD, so we can cleanly move the CAPI cluster.
@@ -91,3 +109,82 @@ spells:
     echo "Deleting cluster API cluster..."
     kubectl -n syn-cluster-api delete cluster ${INPUT_commodore_cluster_id}
     echo "✅ Cluster API cluster deleted."
+
+- match: Then I delete the cluster's Vault secrets
+  description: |-
+    This step cleans up all the cluster's Vault secrets.
+  inputs:
+  - name: commodore_cluster_id
+  - name: commodore_api_url
+  - name: vault_address
+  - name: vault_login_method
+  - name: backup_deletion_confirmation
+  run: |
+    set -euo pipefail
+    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
+
+    LIEUTENANT_AUTH="Authorization: Bearer $(commodore fetch-token)"
+    REPO_URL=$(curl -sH "${LIEUTENANT_AUTH}" "${INPUT_commodore_api_url}/clusters/${INPUT_commodore_cluster_id}" | jq -r .gitRepo.url)
+
+    if [ -e catalog ]
+    then
+      rm -rf catalog
+    fi
+
+    mkdir catalog
+    git archive --remote "${REPO_URL}" master | tar -xC catalog
+
+    PASSWORD_KEY="$(yq -o=json 'select(.kind == "Secret" and .metadata.name == "objects-backup-password") | .stringData.password' catalog/manifests/cluster-backup/10_object.yaml | cut -d: -f2)"
+    ID_KEY="$(yq -o=json 'select(.kind == "Secret" and .metadata.name == "objects-backup-s3-credentials") | .stringData.username' catalog/manifests/cluster-backup/10_object.yaml | cut -d: -f2)"
+    SECRET_KEY="$(yq -o=json 'select(.kind == "Secret" and .metadata.name == "objects-backup-s3-credentials") | .stringData.password' catalog/manifests/cluster-backup/10_object.yaml | cut -d: -f2)"
+
+    export VAULT_ADDR=${INPUT_vault_address}
+    vault login -method=${INPUT_vault_login_method}
+
+    for secret in $(find catalog/refs/ -type f \
+      | sed -r -e 's#catalog/refs#clusters/kv#' -e 's#(.*)/.*#\1#' \
+      | grep -v '__shared__/__shared__' \
+      | sort -u);
+    do
+      if [[ ${INPUT_backup_deletion_confirmation} == "YES" ]]
+      then
+        vault kv delete "$secret"
+      else
+        # exclude backup credentials because the backup still exists
+        if echo "$PASSWORD_KEY $ID_KEY $SECRET_KEY" | grep "${secret##clusters/kv/}" > /dev/null
+        then
+          echo "Skipping key '$secret' as it is required to access cluster backups."
+        else
+          vault kv delete "$secret"
+        fi
+      fi
+    done
+
+- match: And I delete the cluster from Lieutenant
+  description: |-
+    This step deletes the cluster from Lieutenant
+  inputs:
+  - name: commodore_cluster_id
+  - name: commodore_api_url
+  run: |
+    set -euo pipefail
+    echo "Deleting cluster on Lieutenant at ${INPUT_commodore_api_url} ..."
+    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
+    curl -H "Authorization: Bearer $(commodore fetch-token)" -XDELETE \
+      "${INPUT_commodore_api_url%/}/clusters/${INPUT_commodore_cluster_id}"
+
+- match: And I delete the Keycloak service
+  inputs:
+  - name: commodore_cluster_id
+  description: |-
+    This step deletes the cluster's keycloak service from control.vshn.net
+  run: |
+    set -euo pipefail
+    echo '##############################################################################'
+    echo '#                                                                            #'
+    echo "#  Please manually delete the cluster's keycloak service before proceeding.  #"
+    echo '#                                                                            #'
+    echo '##############################################################################'
+    echo
+    echo You can go to https://control.vshn.net/vshn/services/${INPUT_commodore_cluster_id}/delete
+    sleep 2
