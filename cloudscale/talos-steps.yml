@@ -50,10 +50,10 @@ spells:
     image_slug="talos-v${INPUT_talos_version}-${INPUT_talos_schematic_uuid:0:8}"
     env -i "custom_image_slug=$image_slug" >> "$OUTPUT"
 
+    target_zones="-Fzones=${INPUT_csp_region}1"
     # NOTE(sg): The value of zones is a space-separated list of zones where
     # the image with the given slug exists or the empty string if the image
     # doesn't exist in any zone.
-    existing_zone=
     zones=$(curl -fsSL -H "$auth_header" https://api.cloudscale.ch/v1/custom-images | \
       jq --arg slug "$image_slug" -r '.[] | select(.slug == $slug) | [.zones[]|.slug]|join(" ")')
     if [ -n "$zones" ] && [[ "$zones" == *"${INPUT_csp_region}1"* ]]; then
@@ -61,7 +61,7 @@ spells:
       exit 0
     elif [ -n "$zones" ]; then
       echo "Image '$image_slug' already exists in cloudscale zone(s) '${zones}', configuring multi-zone image upload"
-      existing_zone="-Fzones=${zones}"
+      target_zones="${target_zones} -Fzones=${zones}"
     fi
 
     if [ ! -f "$image" ]; then
@@ -80,7 +80,7 @@ spells:
     import_resp=$(curl -fsSL -H "$auth_header" \
       -F url="$(mc share download --json "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap/${image}" | jq -r .url)" \
       -F name="Talos Linux v${INPUT_talos_version} (schematic ${INPUT_talos_schematic_uuid:0:8})" \
-      -F zones="${INPUT_csp_region}1" "${existing_zone}" \
+      "${target_zones}" \
       -F slug="$image_slug" \
       -F source_format=raw \
       -F user_data_handling=pass-through \
