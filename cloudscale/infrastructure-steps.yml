@@ -311,3 +311,113 @@ spells:
 
     echo -e "\n\nDon't continue with subsequent steps until you've configured the DNS records."
     sleep 5
+
+- match: And I delete the cloudscale floating IPs
+  description: |-
+    Delete cloudscale floating IPs via cloudscale API
+  inputs:
+    - name: cloudscale_token
+    - name: commodore_cluster_id
+  run: |
+    set -euo pipefail
+
+    auth_header="Authorization: Bearer ${INPUT_cloudscale_token}"
+
+    echo "Deleting floating IPs for '${INPUT_commodore_cluster_id}'..."
+    for floating_ip in $(curl -fsSL -H"$auth_header" \
+      "https://api.cloudscale.ch/v1/floating-ips?tag:cluster_id=${INPUT_commodore_cluster_id}" |\
+      jq -r '.[]|"\(.href)|\(.network)"'); do
+      echo "Deleting floating IP '${floating_ip/*|}' at '${floating_ip/|*}'."
+      curl -fsSL -H"$auth_header" -XDELETE "${floating_ip/|*}"
+    done
+    echo "✅ Floating IPs for '${INPUT_commodore_cluster_id}' deleted."
+
+- match: And I delete the cloudscale router
+  description: |-
+    Delete cloudscale router via cloudscale API
+  inputs:
+    - name: cloudscale_token
+    - name: commodore_cluster_id
+  run: |
+    set -euo pipefail
+
+    auth_header="Authorization: Bearer ${INPUT_cloudscale_token}"
+
+    echo "Deleting router(s) for '${INPUT_commodore_cluster_id}'..."
+    for router in $(curl -fsSL -H"$auth_header" \
+      "https://api.cloudscale.ch/v1/routers?tag:cluster_id=${INPUT_commodore_cluster_id}" |\
+      jq -r '.[]|"\(.uuid)|\(.name)"'); do
+      echo "Deleting cloudscale router '${router/*|}' (uuid '${router/|*}')..."
+      for iface in $(curl -fsSL -H"$auth_header" \
+        "https://api.cloudscale.ch/v1/routers/${router/|*}" |\
+        jq -r '.interfaces[]|"\(.uuid)|\(.network.name)"'); do
+        echo "Deleting router interface '${iface/|*}' in network '${iface/*|}'..."
+        curl -fsSL -H"$auth_header" -XDELETE \
+          "https://api.cloudscale.ch/v1/routers/${router/|*}/interfaces/${iface/|*}"
+        echo "✅ Interface '${iface/|*}' in network '${iface/*|}' deleted."
+      done
+      curl -fsSL -H"$auth_header" -XDELETE "https://api.cloudscale.ch/v1/routers/${router/|*}"
+      echo "✅ Router '${router/*|}' deleted."
+
+    done
+    echo "✅ Router(s) for '${INPUT_commodore_cluster_id}' deleted."
+
+- match: And I delete the cloudscale subnet and private network
+  description: |-
+    Delete cloudscale subnet and private network via cloudscale API.
+  inputs:
+    - name: cloudscale_token
+    - name: commodore_cluster_id
+  run: |
+    set -euo pipefail
+
+    auth_header="Authorization: Bearer ${INPUT_cloudscale_token}"
+
+    echo "Deleting cloudscale subnet(s) for '${INPUT_commodore_cluster_id}'..."
+    for subnet in $(curl -fsSL -H"$auth_header" \
+      "https://api.cloudscale.ch/v1/subnets?tag:cluster_id=${INPUT_commodore_cluster_id}" |\
+      jq -r '.[]|"\(.href)|\(.cidr)"'); do
+      echo "Deleting cloudscale subnet '${subnet/*|}' at '${subnet/|*}'..."
+      curl -fsSL -H"$auth_header" -XDELETE "${subnet/|*}"
+      echo "✅ Cloudscale subnet '${subnet/*|}' deleted."
+    done
+    echo "Deleting cloudscale network(s) for '${INPUT_commodore_cluster_id}'..."
+    for network in $(curl -fsSL -H"$auth_header" \
+      "https://api.cloudscale.ch/v1/networks?tag:cluster_id=${INPUT_commodore_cluster_id}" |\
+      jq -r '.[]|"\(.href)|\(.name)"'); do
+      echo "Deleting cloudscale network '${network/*|}' at '${network/|*}'..."
+      curl -fsSL -H"$auth_header" -XDELETE "${network/|*}"
+      echo "✅ Cloudscale network '${network/*|}' deleted."
+    done
+
+- match: And I delete the cloudscale S3 buckets
+  description: |-
+    Delete non-backup cloudscale S3 buckets.
+  inputs:
+    - name: cloudscale_token
+    - name: commodore_cluster_id
+    - name: csp_region
+  run: |
+    set -euo pipefail
+    # Use already exiting bucket user
+    response=$(curl -sH "Authorization: Bearer ${INPUT_cloudscale_token}" \
+      https://api.cloudscale.ch/v1/objects-users | \
+      jq -e ".[] | select(.display_name == \"${INPUT_commodore_cluster_id}\")")
+
+    # configure minio client to use the bucket
+    mc alias set \
+      "${INPUT_commodore_cluster_id}" "https://objects.${INPUT_csp_region}.cloudscale.ch" \
+      "$(echo "$response" | jq -r '.keys[0].access_key')" \
+      "$(echo "$response" | jq -r '.keys[0].secret_key')"
+
+    echo "Deleting non-backup S3 buckets..."
+
+    for bucket in "${INPUT_commodore_cluster_id}-bootstrap" "${INPUT_commodore_cluster_id}-syn-loki-chunks"; do
+      if mc ls "${INPUT_commodore_cluster_id}/${bucket}" &>/dev/null; then
+        echo "Deleting bucket '${bucket}'..."
+        mc rb "${INPUT_commodore_cluster_id}/${bucket}" --force
+      else
+        echo "Bucket '${bucket}' doesn't exist"
+      fi
+    done
+    echo "✅ Deleted non-backup S3 buckets."

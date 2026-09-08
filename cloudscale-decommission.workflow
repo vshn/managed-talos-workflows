@@ -13,3 +13,9 @@ And I delete all Load Balancer services
 And I delete all Persistent Volumes
 Then I delete the Talos cluster via Cluster API
 And delete the Kind cluster
+Then I delete the jumphost
+And I delete the cloudscale floating IPs
+And I delete the cloudscale router
+And I delete the cloudscale subnet and private network
+And I delete the cloudscale S3 buckets
+Finally I delete the cluster backups and cloudscale objects user

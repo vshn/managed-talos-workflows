@@ -44,3 +44,106 @@ spells:
     kubectl delete pv --all
     kubectl wait --for=delete pv --all --timeout=120s
     echo "✅ All PVs deleted."
+
+- match: Finally I delete the cluster backups and cloudscale objects user
+  description: |-
+    This step deletes the cluster's associated backup buckets from cloudscale.
+  inputs:
+  - name: cloudscale_token
+  - name: vault_address
+  - name: vault_login_method
+  - name: commodore_cluster_id
+  - name: commodore_api_url
+  - name: backup_deletion_confirmation
+    description: |-
+      Really delete the cluster backup?
+
+      Type "YES" to delete the cluster backup. With any other value, backup deletion gets skipped.
+
+      Remember to confirm backup deletion according to the 4-eye principle:
+      you and a colleague should agree that the backup needs to be deleted.
+  run: |
+    set -euo pipefail
+
+    if [[ ${INPUT_backup_deletion_confirmation} != "YES" ]]
+    then
+        echo '################################################################'
+        echo '#                                                              #'
+        echo '#  Skipping backup deletion because no confirmation was given  #'
+        echo '#                                                              #'
+        echo '################################################################'
+        exit 0
+    fi
+    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
+
+    LIEUTENANT_AUTH="Authorization: Bearer $(commodore fetch-token)"
+    REPO_URL="$(curl -sH "${LIEUTENANT_AUTH}" "${INPUT_commodore_api_url}/clusters/${INPUT_commodore_cluster_id}" | jq -r .gitRepo.url)"
+
+    if [ -e catalog ]
+    then
+      rm -rf catalog
+    fi
+
+    mkdir catalog
+    git archive --remote "${REPO_URL}" master | tar -xC catalog
+
+    export VAULT_ADDR=${INPUT_vault_address}
+    vault login -method=${INPUT_vault_login_method}
+
+    # extract restic credentials from catalog and vault
+    echo "Get restic credentials from cluster catalog and Vault..."
+    restic_repo=s3:$(yq -o=json 'select(.kind == "Schedule")| .spec.backend.s3 | .endpoint + "/" + .bucket' catalog/manifests/cluster-backup/10_object.yaml | tr -d '"')
+    export RESTIC_REPOSITORY="$restic_repo"
+    echo "$RESTIC_REPOSITORY"
+
+    s3_ep=s3:$(yq -o=json 'select(.kind == "Schedule")| .spec.backend.s3 | .endpoint' catalog/manifests/cluster-backup/10_object.yaml | tr -d '"')
+    export S3_ENDPOINT="$s3_ep"
+    echo "$S3_ENDPOINT"
+
+    PASSWORD_KEY="$(yq -o=json 'select(.kind == "Secret" and .metadata.name == "objects-backup-password") | .stringData.password' catalog/manifests/cluster-backup/10_object.yaml | cut -d: -f2)"
+    restic_pw=$(vault kv get -format json "clusters/kv/${PASSWORD_KEY%/*}" | jq -r ".data.data.${PASSWORD_KEY##*/}")
+    export RESTIC_PASSWORD="$restic_pw"
+
+    ID_KEY="$(yq -o=json 'select(.kind == "Secret" and .metadata.name == "objects-backup-s3-credentials") | .stringData.username' catalog/manifests/cluster-backup/10_object.yaml | cut -d: -f2)"
+    aws_id=$(vault kv get -format json "clusters/kv/${ID_KEY%/*}" | jq -r ".data.data.${ID_KEY##*/}")
+    export AWS_ACCESS_KEY_ID="$aws_id"
+
+    SECRET_KEY="$(yq -o=json 'select(.kind == "Secret" and .metadata.name == "objects-backup-s3-credentials") | .stringData.password' catalog/manifests/cluster-backup/10_object.yaml | cut -d: -f2)"
+    aws_secret=$(vault kv get -format json "clusters/kv/${SECRET_KEY%/*}" | jq -r ".data.data.${SECRET_KEY##*/}")
+    export AWS_SECRET_ACCESS_KEY="$aws_secret"
+
+    echo "Retrieving latest restic snapshot..."
+    # retrieve latest restic snapshot
+    OBJECT_ID="$(restic snapshots -H syn-cluster-backup --latest 1 --json | jq -r .[-1].id)"
+
+    mkdir -p backup-dump-${INPUT_commodore_cluster_id}
+
+    if [[ "$OBJECT_ID" != "null" ]]
+    then
+      restic restore "$OBJECT_ID" --target backup-dump-${INPUT_commodore_cluster_id}
+    fi
+
+    # retrieve latest etcd snapshot
+    echo "==== TODO retrieve etcd snapshot TODO ===="
+
+    # proceed with deleting the backup bucket
+    # Use already exiting bucket user
+    response=$(curl -sH "Authorization: Bearer ${INPUT_cloudscale_token}" \
+      https://api.cloudscale.ch/v1/objects-users | \
+      jq -e ".[] | select(.display_name == \"${INPUT_commodore_cluster_id}\")")
+
+    # configure minio client to use the bucket
+    mc alias set \
+      "${INPUT_commodore_cluster_id}_backup" "${S3_ENDPOINT##s3:}" \
+      "$(echo "$response" | jq -r '.keys[0].access_key')" \
+      "$(echo "$response" | jq -r '.keys[0].secret_key')"
+
+    # Delete bucket
+    mc rb "${INPUT_commodore_cluster_id}_backup/${INPUT_commodore_cluster_id}-cluster-backup" --force
+
+    # Delete etcd snapshots bucket
+    mc rb "${INPUT_commodore_cluster_id}_backup/${INPUT_commodore_cluster_id}-etcd-backup" --force
+
+    # Delete object user
+    echo "Deleting object user ..."
+    curl -i -H "Authorization: Bearer ${INPUT_cloudscale_token}" -X DELETE "$(echo "$response" | jq -r '.href')"

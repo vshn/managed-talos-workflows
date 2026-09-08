@@ -181,3 +181,23 @@ spells:
     fi
     echo "jumphost_public_ip=$server_public_ip" >> "$OUTPUT"
     echo "jumphost_ed25519_hostkey=$ed25519_hostkey" >> "$OUTPUT"
+
+- match: Then I delete the jumphost
+  description: |-
+    Delete the jumphost VM via cloudscale API
+  inputs:
+    - name: cloudscale_token
+    - name: commodore_cluster_id
+  run: |
+    set -euo pipefail
+
+    auth_header="Authorization: Bearer ${INPUT_cloudscale_token}"
+
+    echo "Deleting jumphost(s) for '${INPUT_commodore_cluster_id}'..."
+    for server in $(curl -fsSL -H"$auth_header" \
+      "https://api.cloudscale.ch/v1/servers?tag:cluster_id=${INPUT_commodore_cluster_id}" |\
+      jq -r '.[]|"\(.href)|\(.name)"'); do
+      echo "Deleting jumphost '${server/*|}' at '${server/|*}."
+      curl -fsSL -H"$auth_header" -XDELETE "${server/|*}"
+    done
+    echo "✅ Jumphost(s) for '${INPUT_commodore_cluster_id}' deleted."

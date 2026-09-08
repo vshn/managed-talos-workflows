@@ -15,16 +15,30 @@ spells:
         The Project Syn ID of the cluster to decommission.
   outputs:
     - name: talos_kubeconfig
+    - name: csp_region
+    - name: vault_address
+    - name: vault_login_method
   run: |
     set -euo pipefail
 
-    echo "Extracting base domain for cluster '${INPUT_commodore_cluster_id}'."
+    echo "Retrieving Vault address and login method..."
+    vault_addr=$(curl -s "${COMMODORE_API_URL}" | jq -r '.vault.addr')
+    if test -z "$vault_addr" || test "$vault_addr" == "null"; then echo "❌ Failed to retrieve Vault address from Lieutenant at '${COMMODORE_API_URL}'."; exit 1; else echo "✅ Retrieved Vault address '${vault_addr}' for Lieutenant at '${COMMODORE_API_URL}'."; fi
+    env -i "vault_address=${vault_addr}" >> "$OUTPUT"
+    vault_login_method=$(curl -s "${COMMODORE_API_URL}" | jq -r '.vault.loginMethod')
+    if test -z "$vault_login_method" || test "$vault_login_method" == "null"; then echo "❌ Failed to retrieve Vault login method from Lieutenant at '${COMMODORE_API_URL}'."; exit 1; else echo "✅ Retrieved Vault login method '${vault_login_method}' for Lieutenant at '${COMMODORE_API_URL}'."; fi
+    env -i "vault_login_method=${vault_login_method}" >> "$OUTPUT"
 
+    echo "Fetching cluster '${INPUT_commodore_cluster_id}' from Lieutenant..."
     export COMMODORE_API_URL="${INPUT_commodore_api_url}"
-    apps_domain=$(curl -fsSL -H"Authorization: Bearer $(commodore fetch-token)" \
-      "${INPUT_commodore_api_url}/clusters/${INPUT_commodore_cluster_id}" |\
-      jq -r '.dynamicFacts.talosAppsDomain')
+    cluster_json=$(curl -fsSL -H"Authorization: Bearer $(commodore fetch-token)" \
+      "${INPUT_commodore_api_url}/clusters/${INPUT_commodore_cluster_id}")
+    region=$(jq -r --argjson cluster "$cluster_json" '$cluster.facts.region')
+    if test -z "$region" || test "$region" == "null" ; then { echo "❌ Failed to retrieve CSP region for cluster ID '$INPUT_commodore_cluster_id'."; exit 1; } ; else { echo "✅ Retrieved CSP region '$region' for cluster ID '$INPUT_commodore_cluster_id'."; } ; fi
+    env -i "csp_region=$region" >> "$OUTPUT"
 
+    echo "Extracting apps domain for cluster '${INPUT_commodore_cluster_id}'."
+    apps_domain=$(jq -r --argjson cluster "$cluster_json" '$cluster.dynamicFacts.talosAppsDomain')
     echo "Fetching kubeconfig for cluster '${INPUT_commodore_cluster_id}' from 'https://kubeconfig.${apps_domain}'."
     curl -fsSLo "${INPUT_commodore_cluster_id}.kubeconfig" \
       "https://kubeconfig.${apps_domain}/kubeconfig"
