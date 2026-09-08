@@ -18,8 +18,11 @@ spells:
     - name: csp_region
     - name: vault_address
     - name: vault_login_method
+    - name: commodore_tenant_id
   run: |
     set -euo pipefail
+
+    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
 
     echo "Retrieving Vault address and login method..."
     vault_addr=$(curl -s "${COMMODORE_API_URL}" | jq -r '.vault.addr')
@@ -30,15 +33,19 @@ spells:
     env -i "vault_login_method=${vault_login_method}" >> "$OUTPUT"
 
     echo "Fetching cluster '${INPUT_commodore_cluster_id}' from Lieutenant..."
-    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
     cluster_json=$(curl -fsSL -H"Authorization: Bearer $(commodore fetch-token)" \
       "${INPUT_commodore_api_url}/clusters/${INPUT_commodore_cluster_id}")
-    region=$(jq -r --argjson cluster "$cluster_json" '$cluster.facts.region')
+
+    echo "Extracting Project Syn tenant ID for '${INPUT_commodore_cluster_id}'..."
+    tenant=$(jq -n -r --argjson cluster "$cluster_json" '$cluster.tenant')
+    env -i "commodore_tenant_id=$tenant" >> "$OUTPUT"
+
+    region=$(jq -n -r --argjson cluster "$cluster_json" '$cluster.facts.region')
     if test -z "$region" || test "$region" == "null" ; then { echo "❌ Failed to retrieve CSP region for cluster ID '$INPUT_commodore_cluster_id'."; exit 1; } ; else { echo "✅ Retrieved CSP region '$region' for cluster ID '$INPUT_commodore_cluster_id'."; } ; fi
     env -i "csp_region=$region" >> "$OUTPUT"
 
     echo "Extracting apps domain for cluster '${INPUT_commodore_cluster_id}'."
-    apps_domain=$(jq -r --argjson cluster "$cluster_json" '$cluster.dynamicFacts.talosAppsDomain')
+    apps_domain=$(jq -n -r --argjson cluster "$cluster_json" '$cluster.dynamicFacts.talosAppsDomain')
     echo "Fetching kubeconfig for cluster '${INPUT_commodore_cluster_id}' from 'https://kubeconfig.${apps_domain}'."
     curl -fsSLo "${INPUT_commodore_cluster_id}.kubeconfig" \
       "https://kubeconfig.${apps_domain}/kubeconfig"
