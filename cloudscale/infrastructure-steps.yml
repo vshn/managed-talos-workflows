@@ -237,7 +237,8 @@ spells:
           "reverse_ptr": $reverse_ptr,
           "prefix_length": 32,
           "tags": {
-            "cluster_id": $cluster_id
+            "cluster_id": $cluster_id,
+            "managed_by": "gandalf"
           }
         }')
       api_vip_resp=$(curl -fsSL -H"$auth_header" https://api.cloudscale.ch/v1/floating-ips \
@@ -270,7 +271,8 @@ spells:
         "reverse_ptr": $reverse_ptr,
         "prefix_length": 32,
         "tags": {
-          "cluster_id": $cluster_id
+          "cluster_id": $cluster_id,
+          "managed_by": "gandalf"
         }
       }')
     ingress_vip_resp=$(curl -fsSL -H"$auth_header" https://api.cloudscale.ch/v1/floating-ips \
