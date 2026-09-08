@@ -18,3 +18,5 @@ help: ## Show this help
 .PHONY: check
 check: ## Run shellcheck on workflow scripts
 	./shellcheck.sh -y -q ./*/*.yml
+	shellcheck ./cloudscale/scripts/socks-proxy
+	shellcheck ./cloudscale/scripts/ssh-hostkey
