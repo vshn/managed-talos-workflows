@@ -1,6 +1,6 @@
 Given I have all prerequisites installed
 And I select the cluster to decommission
-And a cloudscale API token
+And I extract the cloudscale API token from the cluster
 Then I confirm cluster deletion
 Then I set up a Kind cluster
 And I set up an SSH jumphost in the cluster network

@@ -1,4 +1,29 @@
 spells:
+- match: And I extract the cloudscale API token from the cluster
+  description: |-
+    This step uses the cluster's kubeconfig to extract the cluster's cloudscale API token from the cloudscale CAPI provider secret.
+  inputs:
+    - name: talos_kubeconfig
+  outputs:
+    - name: cloudscale_token
+      type: sensitive
+  run: |
+    set -euo pipefail
+
+    export KUBECONFIG="${INPUT_talos_kubeconfig}"
+
+    cloudscale_token=$(kubectl -n syn-cluster-api get secret capcs-cloudscale \
+      -ogo-template='{{.data.token|base64decode}}')
+
+    if [[ $( curl -sH "Authorization: Bearer ${cloudscale_token}" https://api.cloudscale.ch/v1/flavors -o /dev/null -w"%{http_code}" ) != 200 ]]
+    then
+      echo "❌ cloudscale token not valid?"
+      exit 1
+    fi
+
+    echo "✅ Successfully extracted cloudscale token from cluster."
+    env -i "cloudscale_token=$cloudscale_token" >> "$OUTPUT"
+
 - match: Then I delete all pods
   description: |-
     This step deletes all pods on the cluster, so we can delete cloudscale LBs and PVs via the CCM and CSI driver.
