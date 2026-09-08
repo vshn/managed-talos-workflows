@@ -1,0 +1,46 @@
+spells:
+- match: Then I delete all pods
+  description: |-
+    This step deletes all pods on the cluster, so we can delete cloudscale LBs and PVs via the CCM and CSI driver.
+  inputs:
+  - name: talos_kubeconfig
+  run: |
+    set -euo pipefail
+    export KUBECONFIG="${INPUT_talos_kubeconfig}"
+    echo '#  Cordoning nodes ... #'
+    kubectl cordon -l kubernetes.io/os
+    echo '#  Deleting pods ...  #'
+    kubectl delete pods -A -l app!=csi-cloudscale-controller
+    echo "✅ All pods deleted."
+
+- match: And I delete all Load Balancer services
+  description: |-
+    This step deletes all services of type LoadBalancer from the cluster.
+    It then deletes all LoadBalancer instances as well, so that the
+    corresponding Cloudscale resources can be decommissioned by the controller.
+  inputs:
+  - name: talos_kubeconfig
+  run: |
+    set -euo pipefail
+    export KUBECONFIG="${INPUT_talos_kubeconfig}"
+    echo '#  Deleting Services ...  #'
+    kubectl delete svc --field-selector spec.type=LoadBalancer -A
+    kubectl wait --for=delete svc --field-selector spec.type=LoadBalancer -A --timeout=120s
+    echo "✅ All services deleted."
+
+- match: And I delete all Persistent Volumes
+  description: |-
+    This step deletes all Persistent Volumes from the cluster.
+  inputs:
+  - name: talos_kubeconfig
+  run: |
+    set -euo pipefail
+    export KUBECONFIG="${INPUT_talos_kubeconfig}"
+    echo '#  Deleting PVCs ...  #'
+    kubectl delete pvc -A --all
+    kubectl wait --for=delete pvc -A --all --timeout=120s
+    echo "✅ All PVCs deleted."
+    echo '#  Deleting PVs ...  #'
+    kubectl delete pv --all
+    kubectl wait --for=delete pv --all --timeout=120s
+    echo "✅ All PVs deleted."

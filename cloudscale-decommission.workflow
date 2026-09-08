@@ -1,0 +1,15 @@
+Given I have all prerequisites installed
+And I select the cluster to decommission
+And a cloudscale API token
+Then I set up a Kind cluster
+And I set up an SSH jumphost in the cluster network
+And I wait for the jumphost to become ready
+And I set up a SOCKS5 proxy via the SSH jumphost on the Kind cluster's gateway IP
+And I install cluster API in the Kind cluster
+Then I disable ArgoCD on the cluster
+And I move the Talos cluster to the Kind cluster
+Then I delete all pods
+And I delete all Load Balancer services
+And I delete all Persistent Volumes
+Then I delete the Talos cluster via Cluster API
+And delete the Kind cluster

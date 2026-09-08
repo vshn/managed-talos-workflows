@@ -1,0 +1,79 @@
+spells:
+- match: And I select the cluster to decommission
+  description: |-
+    Provide the Project Syn cluster ID of the cluster to decommission.
+
+  inputs:
+    - name: commodore_api_url
+      description: |-
+        URL of the Commodore API on which the cluster is registered.
+
+        Usually https://api.syn.vshn.net for production clusters.
+        Usually https://api-int.syn.vshn.net for test clusters.
+    - name: commodore_cluster_id
+      description: |-
+        The Project Syn ID of the cluster to decommission.
+  outputs:
+    - name: talos_kubeconfig
+  run: |
+    set -euo pipefail
+
+    echo "Extracting base domain for cluster '${INPUT_commodore_cluster_id}'."
+
+    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
+    apps_domain=$(curl -fsSL -H"Authorization: Bearer $(commodore fetch-token)" \
+      "${INPUT_commodore_api_url}/clusters/${INPUT_commodore_cluster_id}" |\
+      jq -r '.dynamicFacts.talosAppsDomain')
+
+    echo "Fetching kubeconfig for cluster '${INPUT_commodore_cluster_id}' from 'https://kubeconfig.${apps_domain}'."
+    curl -fsSLo "${INPUT_commodore_cluster_id}.kubeconfig" \
+      "https://kubeconfig.${apps_domain}/kubeconfig"
+    env -i "talos_kubeconfig=./${INPUT_commodore_cluster_id}.kubeconfig" >> "$OUTPUT"
+    echo "✅ Got kubeconfig for '${INPUT_commodore_cluster_id}'."
+    export KUBECONFIG="${INPUT_commodore_cluster_id}.kubeconfig"
+    if ! kubectl get nodes; then echo "❌ Unable to access cluster with downloaded kubeconfig, check manually."; else echo "✅ Cluster access works with downloaded kubeconfig."; fi
+
+- match: Then I disable ArgoCD on the cluster
+  description: |-
+    Disable Project Syn ArgoCD, so we can cleanly move the CAPI cluster.
+  inputs:
+    - name: talos_kubeconfig
+  run: |
+    set -euo pipefail
+
+    echo "Scaling down ArgoCD components..."
+    export KUBECONFIG=${INPUT_talos_kubeconfig}
+    kubectl -n syn-argocd-operator scale deploy --all --replicas=0
+    kubectl -n syn-argocd-operator wait --for=jsonpath='{status.terminatingReplicas}=0' deployment/syn-argocd-operator-controller-manager
+    kubectl -n syn scale deploy --all --replicas=0
+    kubectl -n syn scale sts --all --replicas=0
+    kubectl -n syn wait --for jsonpath='{status.terminatingReplicas}=0' deploy --all --timeout=180s
+    kubectl -n syn wait --for jsonpath='{status.replicas}=0' sts --all
+    echo "✅ ArgoCD scaled down"
+
+- match: And I move the Talos cluster to the Kind cluster
+  inputs:
+    - name: seed_kubeconfig
+    - name: talos_kubeconfig
+    - name: commodore_cluster_id
+  run: |
+    set -euo pipefail
+    echo "Move cluster API cluster manifests from the Talos cluster..."
+    clusterctl move -n syn-cluster-api --kubeconfig "${INPUT_talos_kubeconfig}" --to-kubeconfig "${INPUT_seed_kubeconfig}"
+    echo "✅ Cluster API cluster manifests moved."
+
+    echo "Wait cluster API cluster to become available on the Kind cluster..."
+    export KUBECONFIG="${INPUT_seed_kubeconfig}"
+    kubectl -n syn-cluster-api wait --for=condition=Available cluster/${INPUT_commodore_cluster_id} --timeout=180s
+    echo "✅ Moved Cluster API cluster ready."
+
+- match: Then I delete the Talos cluster via Cluster API
+  inputs:
+    - name: seed_kubeconfig
+    - name: commodore_cluster_id
+  run: |
+    set -euo pipefail
+    export KUBECONFIG=${INPUT_seed_kubeconfig}
+    echo "Deleting cluster API cluster..."
+    kubectl -n syn-cluster-api delete cluster ${INPUT_commodore_cluster_id}
+    echo "✅ Cluster API cluster deleted."
