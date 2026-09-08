@@ -1,0 +1,282 @@
+spells:
+- match: Then I set up a cloudscale private network
+  description: |-
+    Provision a cloudscale private network for the cluster.
+
+    The step checks if a private network with name <cluster_id>_privnet
+    already exists in the target zone before creating a new network.
+  inputs:
+  - name: commodore_cluster_id
+  - name: csp_region
+  - name: cloudscale_token
+  outputs:
+  - name: cloudscale_privnet_uuid
+  run: |
+    set -euo pipefail
+
+    net_name="privnet_${INPUT_commodore_cluster_id}"
+    auth_header="Authorization: Bearer ${INPUT_cloudscale_token}"
+    existing_net_uuid=$(curl -fsSL -H "${auth_header}" \
+      https://api.cloudscale.ch/v1/networks | \
+      jq -r --arg net_name "${net_name}" --arg zone "${INPUT_csp_region}1" \
+        '.[]|select(.name == $net_name and .zone.slug == $zone)|.uuid')
+    if [ -n "$existing_net_uuid" ]; then
+      echo "A private network with name $net_name already exists (uuid $existing_net_uuid), reusing..."
+      env -i "cloudscale_privnet_uuid=$existing_net_uuid" >> "$OUTPUT"
+      exit 0
+    fi
+    echo "Creating cloudscale private network ${net_name}..."
+    net_req=$(jq -n -r \
+      --arg net_name "$net_name" \
+      --arg zone "${INPUT_csp_region}1" \
+      --arg cluster_id "$INPUT_commodore_cluster_id" \
+      '{
+        name: $net_name, 
+        zone: $zone,
+        mtu: 9000,
+        auto_create_ipv4_subnet: false,
+        tags: {
+          "cluster_id": $cluster_id,
+          "managed_by": "gandalf"
+        }
+      }')
+
+    net_resp=$(curl -fsSL -H "${auth_header}" \
+      https://api.cloudscale.ch/v1/networks \
+      --json "$net_req")
+
+    net_uuid=$(jq -n -r --argjson net "$net_resp" '$net.uuid')
+    echo "Created cloudscale private network ${net_name} with uuid ${net_uuid}..."
+
+    env -i "cloudscale_privnet_uuid=$net_uuid" >> "$OUTPUT"
+
+- match: And I set up a subnet in the cloudscale private network
+  description: |-
+    Provision a subnet for the cluster
+  inputs:
+  - name: commodore_cluster_id
+  - name: cloudscale_token
+  - name: cloudscale_privnet_uuid
+  - name: privnet_subnet_cidr
+  outputs:
+  - name: cloudscale_subnet_uuid
+  - name: subnet_gateway_ip
+  run: |
+    set -euo pipefail
+
+    auth_header="Authorization: Bearer ${INPUT_cloudscale_token}"
+    subnet_gw=$(python3 -c \
+      'import ipaddress, sys; print(next(ipaddress.ip_network(sys.argv[1]).hosts()))' \
+      "$INPUT_privnet_subnet_cidr")
+    env -i "subnet_gateway_ip=$subnet_gw" >> "$OUTPUT"
+
+    net_resp=$(curl -fsSL -H"${auth_header}" \
+      "https://api.cloudscale.ch/v1/networks/${INPUT_cloudscale_privnet_uuid}")
+    net_name=$(jq -r -n --argjson net "$net_resp" '$net.name')
+    existing_subnet_uuid=$(jq -r -n \
+      --argjson net "$net_resp" \
+      --arg cidr "$INPUT_privnet_subnet_cidr" \
+      '$net.subnets[]|select(.cidr==$cidr)|.uuid')
+
+    if [ -n "$existing_subnet_uuid" ]; then
+      echo "Subnet with CIDR $INPUT_privnet_subnet_cidr already exists for network $net_name"
+      env -i "cloudscale_subnet_uuid=$existing_subnet_uuid" >> "$OUTPUT"
+      exit 0
+    fi
+
+    echo "Creating subnet $INPUT_privnet_subnet_cidr with default gateway $subnet_gw for network $net_name ($INPUT_cloudscale_privnet_uuid) ..."
+
+    subnet_req=$(jq -n -r \
+      --arg cidr "$INPUT_privnet_subnet_cidr" \
+      --arg net_uuid "$INPUT_cloudscale_privnet_uuid" \
+      --arg gw "$subnet_gw" \
+      --arg cluster_id "$INPUT_commodore_cluster_id" \
+      '{cidr: $cidr, network: $net_uuid, gateway_address: $gw, tags: {
+        "cluster_id": $cluster_id,
+        "managed_by": "gandalf"
+      }}')
+
+    subnet_resp=$(curl -fsSL -H"$auth_header" https://api.cloudscale.ch/v1/subnets \
+      --json "$subnet_req")
+    subnet_uuid=$(jq -n -r --argjson subnet "$subnet_resp" '$subnet.uuid')
+
+    echo "Created subnet $INPUT_privnet_subnet_cidr ($subnet_uuid) for network $net_name ($INPUT_cloudscale_privnet_uuid)"
+
+    env -i "cloudscale_subnet_uuid=$subnet_uuid" >> "$OUTPUT"
+
+- match: And I provision a router for the new network
+  description: |-
+    Provision a cloudscale router with an interface in the cluster network.
+  inputs:
+  - name: commodore_cluster_id
+  - name: base_domain
+  - name: csp_region
+  - name: cloudscale_token
+  - name: cloudscale_privnet_uuid
+  - name: cloudscale_subnet_uuid
+  - name: subnet_gateway_ip
+  outputs:
+  - name: cloudscale_router_uuid
+  - name: cloudscale_router_public_ip
+  run: |
+    set -euo pipefail
+
+    # NOTE(sg): if the router name is a FQDN the reverse ptr for the public ip
+    # is set to the router name.
+    router_name="egress.${INPUT_commodore_cluster_id}.${INPUT_base_domain}"
+
+    auth_header="Authorization: Bearer ${INPUT_cloudscale_token}"
+    existing_router_resp=$(curl -fsSL -H "${auth_header}" \
+      https://api.cloudscale.ch/v1/routers | \
+      jq -r --arg name "${router_name}" \
+      '.[]|select(.name == $name)')
+      
+    if [ -n "$existing_router_resp" ]; then
+      router_uuid=$(jq -r -n --argjson resp "$existing_router_resp" '$resp.uuid')
+      router_public_ip=$(jq -r -n --argjson resp "$existing_router_resp" \
+        '$resp.internet_gateway_addresses[0].address')
+      existing_subnet_if=$(jq -r -n --argjson resp "$existing_router_resp" \
+        --arg subnet_gateway_ip "$INPUT_subnet_gateway_ip" \
+        '$resp.interfaces[]|select(.addresses[0].address==$subnet_gateway_ip)')
+      echo "A router with name '$router_name' already exists (uuid '$router_uuid'), reusing..."
+    else
+      echo "Provisioning cloudscale router ..."
+      router_req=$(jq -n -r \
+        --arg name "${router_name}" \
+        --arg zone "${INPUT_csp_region}1" \
+        --arg cluster_id "${INPUT_commodore_cluster_id}" \
+        '{
+          name: $name,
+          zone: $zone,
+          internet_gateway: true,
+          tags: {
+            "cluster_id": $cluster_id,
+            "managed_by": "gandalf"
+          }
+        }')
+
+      router_resp=$(curl -fsSL -H "${auth_header}" \
+        https://api.cloudscale.ch/v1/routers \
+        --json "$router_req")
+
+      router_uuid=$(jq -r -n --argjson resp "$router_resp" \
+        '$resp.uuid')
+      router_public_ip=$(jq -r -n --argjson resp "$router_resp" \
+        '$resp.internet_gateway_addresses[0].address')
+      existing_subnet_if=""
+    fi
+
+    env -i "cloudscale_router_uuid=${router_uuid}" >> "$OUTPUT"
+    env -i "cloudscale_router_public_ip=${router_public_ip}" >> "$OUTPUT"
+
+    if [ -n "$existing_subnet_if" ]; then
+      existing_if_uuid=$(jq -n -r --argjson resp "$existing_subnet_if" '$resp.uuid')
+      echo "The router already has an interface in the cluster network: ${existing_if_uuid}, reusing..."
+      exit 0
+    fi
+
+    echo "Provisioning cloudscale router interface for cluster network ..."
+
+    router_if_req=$(jq -n -r \
+      --arg privnet_uuid "${INPUT_cloudscale_privnet_uuid}" \
+      --arg subnet_uuid "${INPUT_cloudscale_subnet_uuid}" \
+      --arg subnet_gateway_ip "${INPUT_subnet_gateway_ip}" \
+      '{
+        network: $privnet_uuid,
+        addresses: [{
+          "subnet": $subnet_uuid,
+          "address": $subnet_gateway_ip
+        }]
+      }'
+    )
+
+    router_if_resp=$(curl -fsSL -H "${auth_header}" \
+      "https://api.cloudscale.ch/v1/routers/${router_uuid}/interfaces" \
+      --json "$router_if_req")
+
+    mac_addr=$(jq -n -r --argjson resp "$router_if_resp" '$resp.mac_address')
+    echo "Router interface provisioned: $mac_addr"
+
+- match: And I allocate a cloudscale floating IP for the Talos cluster's Kubernetes API and Ingress
+  description: |-
+    We allocate a cloudscale floating IP for the Talos cluster's Kubernetes
+    API and the cluster ingress. We allocate the API floating IP here instead
+    of letting the cloudscale CAPI provider handle this because we need to set
+    the API IP for Cilium in kube-proxy-free mode.
+  inputs:
+    - name: cloudscale_token
+    - name: csp_region
+    - name: commodore_cluster_id
+    - name: base_domain
+  outputs:
+    - name: talos_api_vip
+    - name: talos_ingress_vip
+  run: |
+    set -euo pipefail
+
+    auth_header="Authorization: Bearer ${INPUT_cloudscale_token}"
+    api_reverse_ptr="api.${INPUT_commodore_cluster_id}.${INPUT_base_domain}"
+    existing_vip_resp=$(curl -fsSL -H"$auth_header" \
+      "https://api.cloudscale.ch/v1/floating-ips?tag:cluster-id=${INPUT_commodore_cluster_id}")
+    existing_api_vip=$(jq -r -n --argjson resp "$existing_vip_resp" \
+      --arg reverse_ptr "$api_reverse_ptr" \
+      '$resp[]|select(.reverse_ptr == $reverse_ptr)|.network//""')
+    if [ -n "$existing_api_vip" ]; then
+      echo "Found a floating IP with tag cluster-id=${INPUT_commodore_cluster_id} and reverse PTR ${api_reverse_ptr}: $existing_api_vip. Using it for Talos API..."
+      env -i "talos_api_vip=${existing_api_vip}" >> "$OUTPUT"
+    else
+      echo "Allocating floating IP for Talos K8s API..."
+      api_vip_req=$(jq -c -n -r \
+        --arg region "$INPUT_csp_region" \
+        --arg cluster_id "${INPUT_commodore_cluster_id}" \
+        --arg reverse_ptr "$api_reverse_ptr" \
+        '{
+          "ip_version": 4,
+          "type": "regional",
+          "region": $region,
+          "reverse_ptr": $reverse_ptr,
+          "prefix_length": 32,
+          "tags": {
+            "cluster-id": $cluster_id
+          }
+        }')
+      api_vip_resp=$(curl -fsSL -H"$auth_header" https://api.cloudscale.ch/v1/floating-ips \
+        --json "$api_vip_req")
+
+      api_vip=$(jq -n -r --argjson resp "$api_vip_resp" '$resp.network|split("/")[0]')
+      echo "Allocated floating IP for Talos K8s API: $api_vip"
+      env -i "talos_api_vip=$api_vip" >> "$OUTPUT"
+    fi
+
+    ingress_reverse_ptr="ingress.${INPUT_commodore_cluster_id}.${INPUT_base_domain}"
+    existing_ingress_vip=$(jq -r -n --argjson resp "$existing_vip_resp" \
+      --arg reverse_ptr "$ingress_reverse_ptr" \
+      '$resp[]|select(.reverse_ptr == $reverse_ptr)|.network//""')
+    if [ -n "$existing_ingress_vip" ]; then
+      echo "Found a floating IP with tag cluster-id=${INPUT_commodore_cluster_id} and reverse PTR ${ingress_reverse_ptr}: $existing_ingress_vip. Using it for Talos Ingress..."
+      env -i "talos_ingress_vip=${existing_ingress_vip}" >> "$OUTPUT"
+      exit 0
+    fi
+
+    echo "Allocating floating IP for Talos Ingress..."
+    ingress_vip_req=$(jq -c -n -r \
+      --arg region "$INPUT_csp_region" \
+      --arg cluster_id "${INPUT_commodore_cluster_id}" \
+      --arg reverse_ptr "$ingress_reverse_ptr" \
+      '{
+        "ip_version": 4,
+        "type": "regional",
+        "region": $region,
+        "reverse_ptr": $reverse_ptr,
+        "prefix_length": 32,
+        "tags": {
+          "cluster-id": $cluster_id
+        }
+      }')
+    ingress_vip_resp=$(curl -fsSL -H"$auth_header" https://api.cloudscale.ch/v1/floating-ips \
+      --json "$ingress_vip_req")
+
+    ingress_vip=$(jq -n -r --argjson resp "$ingress_vip_resp" '$resp.network|split("/")[0]')
+    echo "Allocated floating IP for Talos Ingress: $ingress_vip"
+    env -i "talos_ingress_vip=$ingress_vip" >> "$OUTPUT"
+

@@ -1,0 +1,176 @@
+spells:
+- match: And I set up an SSH jumphost in the cluster network
+  description: |-
+    Set up a jumphost which we can use to reach each nodes' Talos API in the
+    bootstrap Talos provider
+  inputs:
+    - name: cloudscale_token
+    - name: commodore_cluster_id
+    - name: commodore_tenant_id
+    - name: base_domain
+    - name: csp_region
+    - name: cloudscale_subnet_uuid
+    - name: privnet_subnet_cidr
+    - name: vault_address
+    - name: vault_login_method
+  outputs:
+    - name: ssh_public_key_path
+    - name: ssh_private_key_path
+    - name: cluster_jumphost_uuid
+  run: |
+    set -euo pipefail
+
+    echo "Generating SSH key for the cluster..."
+
+    export VAULT_ADDR="${INPUT_vault_address}"
+    vault login -method="${INPUT_vault_login_method}"
+
+    ssh_private_key="$(pwd)/ssh_${INPUT_commodore_cluster_id}"
+    ssh_public_key="${ssh_private_key}.pub"
+
+    env -i "ssh_private_key_path=$ssh_private_key" >> "$OUTPUT"
+    env -i "ssh_public_key_path=$ssh_public_key" >> "$OUTPUT"
+
+    if vault kv get -format=json clusters/kv/${INPUT_commodore_tenant_id}/${INPUT_commodore_cluster_id}/cloudscale/ssh >/dev/null 2>&1; then
+      echo "✅ SSH keypair for cluster ${INPUT_commodore_cluster_id} already exists in Vault, skipping generation."
+
+      vault kv get -format=json clusters/kv/${INPUT_commodore_tenant_id}/${INPUT_commodore_cluster_id}/cloudscale/ssh | \
+        jq -r '.data.data.private_key|@base64d' > "${ssh_private_key}"
+
+      chmod 600 "${ssh_private_key}"
+      ssh-keygen -f "${ssh_private_key}" -y > "${ssh_public_key}"
+
+    else
+      echo "Generating new SSH keypair for cluster ${INPUT_commodore_cluster_id}."
+
+      ssh-keygen -C "vault@${INPUT_commodore_cluster_id}" -t ed25519 -f "$ssh_private_key" -N ''
+
+      base64_no_wrap='base64'
+      if [[ "$OSTYPE" == "linux"* ]]; then
+        base64_no_wrap='base64 --wrap 0'
+      fi
+
+      vault kv put clusters/kv/${INPUT_commodore_tenant_id}/${INPUT_commodore_cluster_id}/cloudscale/ssh \
+        private_key="$(cat "$ssh_private_key" | eval "$base64_no_wrap")"
+    fi
+
+    echo Adding SSH private key to ssh-agent...
+    echo You might need to start the ssh-agent first using: eval "\$(ssh-agent)"
+    echo ssh-add "$ssh_private_key"
+    ssh-add "$ssh_private_key"
+
+    auth_header="Authorization: Bearer ${INPUT_cloudscale_token}"
+    echo "Checking if jumphost VM is present..."
+    vms_resp=$(curl -fsSL -H"$auth_header" https://api.cloudscale.ch/v1/servers)
+    jumphost_uuid=$(jq -n -r \
+      --arg vm_name "jumphost.${INPUT_commodore_cluster_id}.${INPUT_base_domain}" \
+      --argjson resp "$vms_resp" \
+      '$resp[]|select(.name == $vm_name)|.uuid//""')
+    if [ -n "$jumphost_uuid" ]; then
+      echo "✅ Found existing jumphost VM with UUID $jumphost_uuid, reusing it..."
+      env -i "cluster_jumphost_uuid=$jumphost_uuid" >> "$OUTPUT"
+      exit 0
+    fi
+
+    echo "Preparing jumphost VM configuration..."
+    jumphost_ip=$(python3 -c 'import ipaddress, sys; net=ipaddress.ip_network(sys.argv[1]); print(f"{net[20]}/{net.prefixlen}")' "${INPUT_privnet_subnet_cidr}")
+    export jumphost_ip
+    netplan_yaml=$(yq -n -r \
+      '{
+        "network": {
+          "ethernets": {
+            "enp3s0": {
+              "dhcp4": true,
+              "dhcp6": true
+            },
+            "enp4s0": {
+              "addresses": [strenv(jumphost_ip)],
+              "dhcp4": false,
+              "dhcp6": false
+            }
+          },
+          "renderer": "networkd",
+          "version": 2
+        }
+      }')
+    export netplan_yaml
+    user_data=$(yq '.write_files +=[{
+      "content": strenv(netplan_yaml),
+      "owner": "root:root",
+      "path": "/etc/netplan/50-jumphost.yaml",
+      "permissions": "0600"
+    }]' "${GANDALF_SPELLBOOK_DIR}/manifests/cloud-init.yaml")
+    server=$(jq -c -r -n \
+      --arg subnet_uuid "$INPUT_cloudscale_subnet_uuid" \
+      --arg csp_region "$INPUT_csp_region" \
+      --arg cluster_domain "${INPUT_commodore_cluster_id}.${INPUT_base_domain}" \
+      --arg jumphost_ip "$jumphost_ip" \
+      --arg ssh_public_key "$(cat "$ssh_public_key")" \
+      --arg user_data "$user_data" \
+      '{
+        "name": "jumphost.\($cluster_domain)",
+        "zone": "\($csp_region)1",
+        "flavor": "flex-4-1",
+        "image": "ubuntu-26.04",
+        "volume_size_gb": 10,
+        "interfaces": [
+          {
+            "network": "public",
+          },
+          {
+            "addresses": [{
+              "subnet": $subnet_uuid,
+              "address": $jumphost_ip|gsub("/.*$"; ""),
+            }]
+          }
+        ],
+        "ssh_keys": [ $ssh_public_key ],
+        "user_data": $user_data
+      }')
+
+    echo "Creating jumphost VM..."
+    jumphost_uuid=$(curl -fsSL -H"$auth_header" https://api.cloudscale.ch/v1/servers --json "$server" | jq -r '.uuid')
+    if test -z "$jumphost_uuid" || test "$jumphost_uuid" == "null"; then echo "❌ Failed to create jumphost."; else echo "✅ Jumphost created successfully. Server UUID: ${jumphost_uuid}"; fi
+    env -i "cluster_jumphost_uuid=$jumphost_uuid" >> "$OUTPUT"
+
+- match: And I wait for the jumphost to become ready
+  description: |-
+    Wait until the jumphost cloudscale server is populated with SSH host keys
+  inputs:
+    - name: cloudscale_token
+    - name: cluster_jumphost_uuid
+  outputs:
+    - name: jumphost_public_ip
+    - name: jumphost_ed25519_hostkey
+  run: |
+    set -euo pipefail
+
+    auth_header="Authorization: Bearer ${INPUT_cloudscale_token}"
+
+    ed25519_hostkey=""
+    while true; do
+      server_resp=$(curl -sH"$auth_header" https://api.cloudscale.ch/v1/servers/$INPUT_cluster_jumphost_uuid)
+      ed25519_hostkey=$(jq -r -n --argjson server "$server_resp" '$server.ssh_host_keys[]|select(.|startswith("ssh-ed25519"))')
+      if [ -n "$ed25519_hostkey" ]; then
+        echo "✅ Server SSH host keys populated: $ed25519_hostkey"
+        break
+      fi
+      sleep 5
+    done
+    server_public_ip=$(jq -r -n --argjson server "$server_resp" \
+        '$server.interfaces[]
+          | select(.type=="public")
+          | .addresses[]
+          | select(.version==4)
+          | .address')
+
+    echo "Connecting to jumphost at ${server_public_ip}"
+
+    if ! "$GANDALF_SPELLBOOK_DIR/scripts/ssh-hostkey" "${server_public_ip} ${ed25519_hostkey}" "ubuntu@${server_public_ip}" "hostname && uptime"; then
+      echo "❌ Failed to connect to jumphost."
+      exit 1
+    else
+      echo "✅ Successfully connected to jumphost."
+    fi
+    echo "jumphost_public_ip=$server_public_ip" >> "$OUTPUT"
+    echo "jumphost_ed25519_hostkey=$ed25519_hostkey" >> "$OUTPUT"

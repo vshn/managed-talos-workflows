@@ -1,0 +1,96 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: cacppt-mutating-webhook-configuration
+webhooks:
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: cacppt-webhook-service
+        namespace: syn-cluster-api
+        path: /mutate-controlplane-cluster-x-k8s-io-v1beta1-taloscontrolplane
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    name: default.taloscontrolplane.controlplane.cluster.x-k8s.io
+    rules:
+      - apiGroups:
+          - controlplane.cluster.x-k8s.io
+        apiVersions:
+          - v1beta1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - taloscontrolplanes
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: cacppt-webhook-service
+        namespace: syn-cluster-api
+        path: /mutate-controlplane-cluster-x-k8s-io-v1beta1-taloscontrolplanetemplate
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    name: default.taloscontrolplanetemplate.controlplane.cluster.x-k8s.io
+    rules:
+      - apiGroups:
+          - controlplane.cluster.x-k8s.io
+        apiVersions:
+          - v1beta1
+        operations:
+          - CREATE
+          - UPDATE
+        resources:
+          - taloscontrolplanetemplates
+    sideEffects: None
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: cacppt-validating-webhook-configuration
+webhooks:
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: cacppt-webhook-service
+        namespace: syn-cluster-api
+        path: /validate-controlplane-cluster-x-k8s-io-v1beta1-taloscontrolplane
+    failurePolicy: Fail
+    name: validate.taloscontrolplane.controlplane.cluster.x-k8s.io
+    rules:
+      - apiGroups:
+          - controlplane.cluster.x-k8s.io
+        apiVersions:
+          - v1beta1
+        operations:
+          - CREATE
+          - UPDATE
+          - DELETE
+        resources:
+          - taloscontrolplanes
+    sideEffects: None
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: cacppt-webhook-service
+        namespace: syn-cluster-api
+        path: /validate-controlplane-cluster-x-k8s-io-v1beta1-taloscontrolplanetemplate
+    failurePolicy: Fail
+    name: validate.taloscontrolplanetemplate.controlplane.cluster.x-k8s.io
+    rules:
+      - apiGroups:
+          - controlplane.cluster.x-k8s.io
+        apiVersions:
+          - v1beta1
+        operations:
+          - CREATE
+          - UPDATE
+          - DELETE
+        resources:
+          - taloscontrolplanetemplates
+    sideEffects: None

@@ -1,0 +1,4 @@
+expected_server_hostkey=$1
+shift
+exec ssh -o StrictHostKeyChecking=yes \
+  -o KnownHostsCommand="/usr/bin/env printf \"$expected_server_hostkey\"" $@

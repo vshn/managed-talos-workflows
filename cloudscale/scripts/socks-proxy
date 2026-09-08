@@ -1,0 +1,23 @@
+#!/bin/bash
+#
+# NOTE(sg): this script should be suitable to ensure the proxy is established
+# in any spells that need the proxy.
+
+set -euo pipefail
+
+script_dir=$(dirname "$0")
+ssh_key=$1
+kind_gateway=$2
+jumphost_ip=$3
+hostkey=$4
+proxy_port=${5:-19000}
+
+if ! pgrep -f "ssh.+-D${kind_gateway}:${proxy_port}" &>/dev/null; then
+  echo "Establishing proxy tunnel..."
+  "${script_dir}/ssh-hostkey" \
+    "${jumphost_ip} ${hostkey}" \
+    -i "$ssh_key" \
+    -f -N -D"${kind_gateway}:${proxy_port}" "ubuntu@${jumphost_ip}"
+else
+  echo "Proxy already running on ${kind_gateway}:${proxy_port}"
+fi
