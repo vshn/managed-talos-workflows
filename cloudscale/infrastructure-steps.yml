@@ -283,3 +283,31 @@ spells:
     echo "✅ Allocated floating IP for Talos Ingress: $ingress_vip"
     env -i "talos_ingress_vip=$ingress_vip" >> "$OUTPUT"
 
+- match: And I configure DNS records for the cluster API, ingress, and egress
+  description: |-
+    This step prints out a zonefile snippet that's suitable for configuring a
+    cluster zone in VSHN's DNS Git repository.
+
+    TODO: Consider automating this step.
+  inputs:
+    - name: commodore_cluster_id
+    - name: base_domain
+    - name: talos_api_vip
+    - name: talos_ingress_vip
+    - name: cloudscale_router_public_ip
+  run: |
+    set -euo pipefail
+
+    echo "Configure the following zone in the DNS provider for '${INPUT_base_domain}'."
+    echo -e "\n\n"
+    echo "; Cluster ${INPUT_commodore_cluster_id}"
+    echo "\$ORIGIN ${INPUT_commodore_cluster_id}.${INPUT_base_domain}."
+    echo ""
+    echo "api         IN A     ${INPUT_talos_api_vip/\/*}"
+    echo "ingress     IN A     ${INPUT_talos_ingress_vip/\/*}"
+    echo "egress      IN A     ${INPUT_cloudscale_router_public_ip}"
+    echo ""
+    echo "*.apps    IN CNAME ingress.c-alde-talos-poc1.appuio-beta.ch."
+
+    echo -e "\n\nDon't continue with subsequent steps until you've configured the DNS records."
+    sleep 5

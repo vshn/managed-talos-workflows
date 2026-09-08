@@ -7,6 +7,7 @@ Then I set up a cloudscale private network
 And I set up a subnet in the cloudscale private network
 And I provision a router for the new network
 And I allocate a cloudscale floating IP for the Talos cluster's Kubernetes API and Ingress
+And I configure DNS records for the cluster API, ingress, and egress
 Then I create a cloudscale objects user and S3 buckets for the cluster
 And I set secrets in Vault
 Then I render the Talos schematic UUID
