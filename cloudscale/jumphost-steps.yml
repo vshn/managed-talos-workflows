@@ -151,13 +151,16 @@ spells:
 
     auth_header="Authorization: Bearer ${INPUT_cloudscale_token}"
 
+    echo "Waiting for cloudscale server SSH host keys to become populated..."
     ed25519_hostkey=""
     while true; do
       server_resp=$(curl -sH"$auth_header" https://api.cloudscale.ch/v1/servers/$INPUT_cluster_jumphost_uuid)
-      ed25519_hostkey=$(jq -r -n --argjson server "$server_resp" '$server.ssh_host_keys[]|select(.|startswith("ssh-ed25519"))')
+      ed25519_hostkey=$(jq -r -n --argjson server "$server_resp" '($server.ssh_host_keys//[])[]|select(.|startswith("ssh-ed25519"))')
       if [ -n "$ed25519_hostkey" ]; then
-        echo "✅ Server SSH host keys populated: $ed25519_hostkey"
+        echo -e "\n✅ Server SSH host keys populated: $ed25519_hostkey"
         break
+      else
+        echo -n "."
       fi
       sleep 5
     done
