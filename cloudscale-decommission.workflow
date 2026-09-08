@@ -3,6 +3,7 @@ And I select the cluster to decommission
 And I extract the cloudscale API token from the cluster
 Then I confirm cluster deletion
 Then I set up a Kind cluster
+And I fetch the cluster's subnet from the cloudscale API
 And I set up an SSH jumphost in the cluster network
 And I wait for the jumphost to become ready
 And I set up a SOCKS5 proxy via the SSH jumphost on the Kind cluster's gateway IP

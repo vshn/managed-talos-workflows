@@ -104,6 +104,32 @@ spells:
 
     env -i "cloudscale_subnet_uuid=$subnet_uuid" >> "$OUTPUT"
 
+- match: And I fetch the cluster's subnet from the cloudscale API
+  description: |-
+    Query cloudscale API for the cluster's subnet and store subnet UUID as output.
+  inputs:
+    - name: commodore_cluster_id
+    - name: cloudscale_token
+  outputs:
+    - name: cloudscale_subnet_uuid
+    - name: privnet_subnet_cidr
+  run: |
+    set -euo pipefail
+
+    auth_header="Authorization: Bearer ${INPUT_cloudscale_token}"
+
+    subnet_resp=$(curl -fsSL -H"$auth_header" "https://api.cloudscale.ch/v1/subnets?tag:cluster_id=${INPUT_commodore_cluster_id}")
+    subnet_count=$(jq -n -r --argjson resp "$subnet_resp" '$resp|length')
+    if [ "$subnet_count" -ne 1 ]; then
+      echo "❌ Query found ${subnet_count} subnets with tag 'cluster_id=${INPUT_commodore_cluster_id}', expected 1."
+      exit 1
+    fi
+    subnet_uuid=$(jq -n -r --argjson resp "$subnet_resp" '$resp[0].uuid')
+    subnet_cidr=$(jq -n -r --argjson resp "$subnet_resp" '$resp[0].cidr')
+    echo "✅ Found cluster subnet (UUID '${subnet_uuid}', CIDR '${subnet_cidr}')"
+    echo "cloudscale_subnet_uuid=$subnet_uuid" >> "$OUTPUT"
+    echo "privnet_subnet_cidr=$subnet_cidr" >> "$OUTPUT"
+
 - match: And I provision a router for the new network
   description: |-
     Provision a cloudscale router with an interface in the cluster network.
