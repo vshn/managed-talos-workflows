@@ -68,6 +68,7 @@ spells:
       echo "Fetching image for schematic ${INPUT_talos_schematic_uuid}..."
       curl -fLo "${image}.xz" https://factory.talos.dev/image/${INPUT_talos_schematic_uuid}/v${INPUT_talos_version}/openstack-amd64.raw.xz
       xz --decompress "${image}.xz"
+      echo "✅ Downloaded Talos image for v${INPUT_talos_version} and schematic id ${INPUT_talos_schematic_uuid}."
     else
       echo "✅ Talos image for v${INPUT_talos_version} and schematic id ${INPUT_talos_schematic_uuid} already present locally, reusing..."
     fi
@@ -75,6 +76,7 @@ spells:
     echo "Uploading Talos image to cloudscale S3..."
     mc cp "$image" "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap/"
     mc anonymous set download "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap/${image}"
+    echo "✅ Talos image upload complete."
 
     echo "Importing image into cloudscale..."
     import_resp=$(curl -fsSL -H "$auth_header" \
@@ -85,9 +87,11 @@ spells:
       -F source_format=raw \
       -F user_data_handling=pass-through \
       https://api.cloudscale.ch/v1/custom-images/import)
+    import_id=$(jq -n -r --argjson import "$import_resp" '$import.uuid')
+
+    echo "✅ Talos image import is running (import UUID '${import_id}')."
 
     echo "Waiting for import to complete..."
-    import_id=$(jq -n -r --argjson import "$import_resp" '$import.uuid')
     import_done=false
     status="initializing"
     step_exit=0
