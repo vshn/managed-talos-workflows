@@ -54,6 +54,26 @@ spells:
     export KUBECONFIG="${INPUT_commodore_cluster_id}.kubeconfig"
     if ! kubectl get nodes; then echo "❌ Unable to access cluster with downloaded kubeconfig, check manually."; else echo "✅ Cluster access works with downloaded kubeconfig."; fi
 
+- match: And I compile the cluster catalog
+  description: |-
+    This step compiles the catalog to ensure you have a local checkout of the cluster repository
+    during decommissioning.
+  inputs:
+  - name: commodore_api_url
+  - name: commodore_cluster_id
+  - name: commodore_tenant_id
+  outputs:
+  - name: base_domain
+  run: |
+    set -euo pipefail
+    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
+    commodore catalog compile ${INPUT_commodore_cluster_id}
+
+    base_domain=$(kapitan inventory --inventory-backend=reclass-rs -t cluster |\
+      yq '.parameters.talos.baseDomain')
+    if test -z "$base_domain" || test "$base_domain" == "null"; then echo "❌ Failed to extract base domain from cluster inventory."; else echo "✅ Extracted base domain '${base_domain}' from cluster inventory."; fi
+    env -i "base_domain=$base_domain" >> "$OUTPUT"
+
 - match: Then I confirm cluster deletion
   description: |-
     This step asks you to confirm with 4 eyes whether this cluster is really to be deleted.
