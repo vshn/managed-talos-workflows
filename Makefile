@@ -20,3 +20,4 @@ check: ## Run shellcheck on workflow scripts
 	./shellcheck.sh -y -q ./*/*.yml
 	shellcheck ./cloudscale/scripts/socks-proxy
 	shellcheck ./cloudscale/scripts/ssh-hostkey
+	shellcheck ./cloudscale/scripts/install-capi.sh
