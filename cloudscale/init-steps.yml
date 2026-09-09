@@ -139,6 +139,20 @@ spells:
     done
     echo "OK"
 
+    if [ "${INPUT_csp_region}" == "rma" ]; then
+      backup_region="lpg"
+    elif [ "${INPUT_csp_region}" == "rma" ]; then
+      backup_region="rma"
+    else
+      echo "❌ Unexpected cloudscale region '${INPUT_csp_region}'."
+      exit 1
+    fi
+
+    mc alias set \
+      "${INPUT_commodore_cluster_id}_backup" "https://objects.${backup_region}.cloudscale.ch" \
+      "$(jq -n -r --argjson resp "$response" '$resp.keys[0].access_key')" \
+      "$(jq -n -r --argjson resp "$response" '$resp.keys[0].secret_key')"
+
     mc mb --ignore-existing \
       "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap"
 
@@ -146,6 +160,6 @@ spells:
       "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-syn-loki-chunks"
 
     mc mb --ignore-existing \
-      "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-etcd-backup"
+      "${INPUT_commodore_cluster_id}_backup/${INPUT_commodore_cluster_id}-etcd-backup"
 
     env -i "bucket_user=$(jq -n -c --argjson user "$response" '$user')" >> "$OUTPUT"
