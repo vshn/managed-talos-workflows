@@ -141,7 +141,7 @@ spells:
 
     if [ "${INPUT_csp_region}" == "rma" ]; then
       backup_region="lpg"
-    elif [ "${INPUT_csp_region}" == "rma" ]; then
+    elif [ "${INPUT_csp_region}" == "lpg" ]; then
       backup_region="rma"
     else
       echo "❌ Unexpected cloudscale region '${INPUT_csp_region}'."
