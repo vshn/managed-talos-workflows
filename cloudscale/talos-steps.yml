@@ -1,0 +1,600 @@
+spells:
+- match: Then I render the Talos schematic UUID
+  description: |-
+    Render the Talos schematic UUID based on the user-provided image customization JSON.
+
+    See https://github.com/siderolabs/image-factory/blob/main/docs/api.md#post-schematics for supported image customization fields.
+  inputs:
+    - name: talos_image_customization
+      description: JSON customization given to the Talos factory. For no customization, enter `{}`.
+  outputs:
+    - name: talos_schematic_uuid
+  run: |
+    set -euo pipefail
+
+    echo "Validating Talos image customization..."
+    talos_image_customization='{}'
+    if jq -rnec "$INPUT_talos_image_customization" >/dev/null; then
+      talos_image_customization="$INPUT_talos_image_customization"
+    else
+      echo "Failed to validate '$INPUT_talos_image_customization' as JSON, falling back to no customization"
+    fi
+
+    echo "Requesting Talos schematic from factory.talos.dev..."
+
+    schematic_resp=$(curl -fsSL https://factory.talos.dev/schematics --json "$talos_image_customization")
+    schematic_id=$(jq -n -r --argjson resp "$schematic_resp" '$resp.id')
+    if test -z "${schematic_id}" || test "${schematic_id}" == "null"; then echo "❌ Failed to fetch schematic ID from 'https://factory.talos.dev'."; else echo "✅ Got schematic ID '${schematic_id}' for customization '${talos_image_customization}'"; fi
+    env -i "talos_schematic_uuid=$schematic_id" >> "$OUTPUT"
+
+- match: And I generate the Talos image and upload it to cloudscale
+  description: |-
+    Request a Talos image from factory.talos.dev, download it, upload it to
+    the cloudscale bootstrap S3 bucket and import it on cloudscale.
+  inputs:
+    - name: commodore_cluster_id
+    - name: cloudscale_token
+    - name: csp_region
+    - name: talos_version
+      description: Talos version to use, without the `v` prefix, e.g. "1.13.4"
+    - name: talos_schematic_uuid
+  outputs:
+    - name: custom_image_slug
+  run: |
+    set -euo pipefail
+
+    auth_header="Authorization: Bearer ${INPUT_cloudscale_token}"
+    # TODO(sg): decide if we want to expose image customization like this
+
+    image="talos-${INPUT_talos_version}-${INPUT_talos_schematic_uuid}-openstack-amd64.raw"
+    image_slug="talos-v${INPUT_talos_version}-${INPUT_talos_schematic_uuid:0:8}"
+    env -i "custom_image_slug=$image_slug" >> "$OUTPUT"
+
+    target_zones="-Fzones=${INPUT_csp_region}1"
+    # NOTE(sg): The value of zones is a space-separated list of zones where
+    # the image with the given slug exists or the empty string if the image
+    # doesn't exist in any zone.
+    zones=$(curl -fsSL -H "$auth_header" https://api.cloudscale.ch/v1/custom-images | \
+      jq --arg slug "$image_slug" -r '.[] | select(.slug == $slug) | [.zones[]|.slug]|join(" ")')
+    if [ -n "$zones" ] && [[ "$zones" == *"${INPUT_csp_region}1"* ]]; then
+      echo "✅ Image '$image_slug' already exists in cloudscale zone ${INPUT_csp_region}, skipping upload."
+      exit 0
+    elif [ -n "$zones" ]; then
+      echo "Image '$image_slug' already exists in cloudscale zone(s) '${zones}', configuring multi-zone image upload"
+      target_zones="${target_zones} -Fzones=${zones}"
+    fi
+
+    if [ ! -f "$image" ]; then
+      echo "Fetching image for schematic ${INPUT_talos_schematic_uuid}..."
+      curl -fLo "${image}.xz" https://factory.talos.dev/image/${INPUT_talos_schematic_uuid}/v${INPUT_talos_version}/openstack-amd64.raw.xz
+      xz --decompress "${image}.xz"
+      echo "✅ Downloaded Talos image for v${INPUT_talos_version} and schematic id ${INPUT_talos_schematic_uuid}."
+    else
+      echo "✅ Talos image for v${INPUT_talos_version} and schematic id ${INPUT_talos_schematic_uuid} already present locally, reusing..."
+    fi
+
+    echo "Uploading Talos image to cloudscale S3..."
+    mc cp "$image" "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap/"
+    mc anonymous set download "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap/${image}"
+    echo "✅ Talos image upload complete."
+
+    echo "Importing image into cloudscale..."
+    import_resp=$(curl -fsSL -H "$auth_header" \
+      -F url="$(mc share download --json "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap/${image}" | jq -r .url)" \
+      -F name="Talos Linux v${INPUT_talos_version} (schematic ${INPUT_talos_schematic_uuid:0:8})" \
+      "${target_zones}" \
+      -F slug="$image_slug" \
+      -F source_format=raw \
+      -F user_data_handling=pass-through \
+      https://api.cloudscale.ch/v1/custom-images/import)
+    import_id=$(jq -n -r --argjson import "$import_resp" '$import.uuid')
+
+    echo "✅ Talos image import is running (import UUID '${import_id}')."
+
+    echo "Waiting for import to complete..."
+    import_done=false
+    status="initializing"
+    step_exit=0
+    while ! $import_done; do
+      import_status_resp=$(curl -fsSL -H "$auth_header" \
+        "https://api.cloudscale.ch/v1/custom-images/import/${import_id}")
+      status=$(jq -n -r --argjson status "$import_status_resp" '$status.status')
+      case "$status" in
+        "started"|"in_progress")
+          echo -n "."
+          import_done=false
+          import_error=
+          ;;
+        "failed")
+          import_done=true
+          import_error="❌ $(jq -n -r --argjson status "$import_status_resp" '$status.error_message')"
+          step_exit=1
+          break
+          ;;
+        "success")
+          import_done=true
+          import_error=
+          break
+          ;;
+        *)
+          import_done=true
+          import_error="⚠️ Unknown import status '${status}', canceling wait for completion, please verify the import status manually!"
+          step_exit=0
+          break
+          ;;
+      esac
+      sleep 5
+    done
+    echo ""
+
+    echo "Import completed with status ${status}"
+    if [ -n "$import_error" ]; then
+      echo -e "\n$import_error"
+      exit "$step_exit"
+    else
+      echo -e "\n✅ Successfully imported image"
+    fi
+    sleep 0.1
+
+
+- match: Then I set up a Kind cluster
+  description: |-
+    Set up a Kind cluster to use as cluster API seed cluster for installing the Talos cluster
+  inputs:
+    - name: commodore_cluster_id
+  outputs:
+    - name: seed_kubeconfig
+    - name: kind_gateway_ip
+  run: |
+    set -euo pipefail
+    export KUBECONFIG=./seed.kubeconfig
+    # TODO(sg): consider switching to envtest at some point. Probably needs a
+    # custom Go wrapper.
+    # TODO(sg): Make step continue gracefully if cluster already exists?
+    kind create cluster --name capi-seed-${INPUT_commodore_cluster_id}
+    kubectl get nodes
+    echo "✅ Kind cluster is ready"
+    env -i "seed_kubeconfig=$KUBECONFIG" >> "$OUTPUT"
+
+    echo "Getting gateway IP for Kind docker network..."
+    kind_net=$(docker network inspect kind)
+    kind_gateway=$(jq -n -r --argjson net "$kind_net" \
+      '$net[0].IPAM.Config[]|select(.Subnet|contains(":")|not)|.Gateway')
+    if test -z "$kind_gateway" || test "$kind_gateway" == "null"; then echo "❌ Failed to extract Kind cluster gateway IP"; exit 1; else echo "✅ Extracted Kind cluster gateway IP '$kind_gateway'."; fi
+    env -i "kind_gateway_ip=$kind_gateway" >> "$OUTPUT"
+
+- match: And I set up a SOCKS5 proxy via the SSH jumphost on the Kind cluster's gateway IP
+  description: |-
+    Set up a SOCKS5 proxy via the SSH jumpohst on the Kind cluster's gateway
+    IP on the host. This proxy is configured in the Talos CAPI provider to
+    enable them to reach the cluster nodes' Talos API.
+  inputs:
+    - name: jumphost_public_ip
+    - name: jumphost_ed25519_hostkey
+    - name: ssh_private_key_path
+    - name: kind_gateway_ip
+  outputs:
+    - name: jumphost_proxy_string
+  run: |
+    set -euo pipefail
+
+    "${GANDALF_SPELLBOOK_DIR}/scripts/socks-proxy" \
+      "${INPUT_ssh_private_key_path}" \
+      "${INPUT_kind_gateway_ip}" \
+      "${INPUT_jumphost_public_ip}" \
+      "${INPUT_jumphost_ed25519_hostkey}"
+
+    echo "Testing proxy tunnel..."
+    proxy_public_ip=$(http_proxy=socks5://${INPUT_kind_gateway_ip}:19000 curl -s4 ifconfig.co)
+    if [ "$proxy_public_ip" != "${INPUT_jumphost_public_ip}" ]; then
+      echo "❌ Expected request public client IP via proxy to be ${INPUT_jumphost_public_ip}, but was ${proxy_public_ip}"
+      echo "Please check proxy tunnel manually"
+      exit 1
+    fi
+    echo "✅ Proxy OK!"
+    env -i "jumphost_proxy_string=socks5://${INPUT_kind_gateway_ip}:19000" >> "$OUTPUT"
+
+- match: And I install cluster API in the Kind cluster
+  description: |-
+    Install cluster API components on the seed cluster
+  inputs:
+    - name: cloudscale_token
+    - name: ssh_private_key_path
+    - name: kind_gateway_ip
+    - name: jumphost_public_ip
+    - name: jumphost_ed25519_hostkey
+    - name: seed_kubeconfig
+    - name: jumphost_proxy_string
+    - name: cacppt_image
+      description: |-
+        This input controls whether the spell patches the CAPI Talos control plane provider.
+
+        Use `none` if you don't need a custom provider build.
+
+        Provide a valid container image if you need a custom provider build.
+    - name: capcs_image
+      description: |-
+        This input controls whether the spell patches the CAPI cloudscale provider.
+
+        Use `none` if you don't need a custom provider build.
+
+        Provide a valid container image if you need a custom provider build.
+  run: |
+    set -euo pipefail
+
+    "${GANDALF_SPELLBOOK_DIR}/scripts/socks-proxy" \
+      "${INPUT_ssh_private_key_path}" \
+      "${INPUT_kind_gateway_ip}" \
+      "${INPUT_jumphost_public_ip}" \
+      "${INPUT_jumphost_ed25519_hostkey}"
+
+    # TODO(sg): switch this to deploying the manifests rendered by Commodore
+    # once we have component-cluster-api? Would also need to deploy
+    # cert-manager somehow.
+
+    export KUBECONFIG="${INPUT_seed_kubeconfig}"
+    if ! kubectl get ns syn-cluster-api &>/dev/null; then
+      echo "Installing cluster API providers on Kind seed cluster..."
+      export CLOUDSCALE_API_TOKEN="${INPUT_cloudscale_token}"
+      clusterctl init \
+        -n syn-cluster-api \
+        --bootstrap talos \
+        --control-plane talos \
+        --infrastructure cloudscale-ch-cloudscale
+      echo "✅ Cluster API initialized successfully."
+    else
+      echo "✅ Namespace syn-cluster-api already exists on seed cluster, assuming that CAPI is already installed..."
+    fi
+
+    # NOTE(sg): We only add the Kind Pod CIDR, service CIDR and node IP(s) to
+    # the cacppt no_proxy variable. The cacppt controller doesn't require any
+    # cluster egress connectivity except for the Talos nodes in the cluster
+    # privnet, so having most traffic go over the SOCKS proxy is fine.
+    cacppt_no_proxy=$(kubectl get nodes -ojson | \
+      jq -r --arg no_proxy "10.244.0.0/16,10.96.0.0/16" \
+        '[.items[].status.addresses[]|select(.type=="InternalIP")|.address]
+          | join(",") as $node_ips
+          | "\($no_proxy),\($node_ips)"')
+
+
+    echo "Patching Talos control plane CAPI provider with SOCKS5 proxy..."
+    kubectl -n syn-cluster-api set env deployment/cacppt-controller-manager \
+      http_proxy="${INPUT_jumphost_proxy_string}" \
+      https_proxy="${INPUT_jumphost_proxy_string}" \
+      no_proxy="${cacppt_no_proxy}"
+    kubectl wait --for=condition=Available -n syn-cluster-api deployment/cacppt-controller-manager
+    echo "✅ Talos control plane CAPI provider configured with SOCKS5 proxy."
+
+    if [ "${INPUT_cacppt_image}" != "none" ]; then
+      echo "Upgrading Talos control plane CAPI provider to CAPI 1.13 feature branch..."
+      image_patch=$(jq -n -r --arg image "$INPUT_cacppt_image" '[{
+        "op": "replace",
+        "path": "/spec/template/spec/containers/0/image",
+        "value": $image
+      }]')
+      kubectl apply --server-side --force-conflicts \
+        -f "${GANDALF_SPELLBOOK_DIR}/manifests/cacppt-crds.yaml"
+      kubectl apply --server-side --force-conflicts \
+        -f "${GANDALF_SPELLBOOK_DIR}/manifests/cacppt-clusterrole.yaml"
+      kubectl apply --server-side --force-conflicts \
+        -f "${GANDALF_SPELLBOOK_DIR}/manifests/cacppt-webhooks.yaml"
+      kubectl -n syn-cluster-api patch deployment/cacppt-controller-manager \
+        --type=json --patch "$image_patch"
+
+      echo "Waiting for Talos control plane CAPI provider rollout..."
+      kubectl wait --for=condition=Available -n syn-cluster-api deployment/cacppt-controller-manager
+      echo "✅ Talos control plane CAPI provider updated."
+    fi
+
+    if [ "${INPUT_capcs_image}" != "none" ]; then
+      echo "Patching image for cloudscale CAPI provider..."
+      image_patch=$(jq -n -r --arg image "${INPUT_capcs_image}" '[{
+        "op": "replace",
+        "path": "/spec/template/spec/containers/0/image",
+        "value": $image
+      }]')
+      kubectl -n syn-cluster-api patch deployment/capcs-controller-manager \
+        --type=json --patch "$image_patch"
+
+      echo "Waiting for cloudscale CAPI provider rollout..."
+      kubectl wait --for=condition=Available -n syn-cluster-api deployment/capcs-controller-manager
+      echo "✅ cloudscale CAPI provider updated."
+    fi
+
+- match: And I configure the Talos cluster via Project Syn
+  description: |-
+    Set Talos configurations in the cluster's Project Syn configuration
+  inputs:
+    - name: commodore_cluster_id
+    - name: commodore_tenant_id
+    - name: commodore_api_url
+    - name: talos_version
+    - name: kubernetes_version
+      description: |-
+        Upstream Kubernetes version to use, including patch version, e.g. "1.36.2"
+        See https://kubernetes.io/releases/
+    - name: cloudscale_privnet_uuid
+    - name: custom_image_slug
+    - name: talos_schematic_uuid
+    - name: talos_api_vip
+    - name: talos_ingress_vip
+    - name: base_domain
+  run: |
+    set -euo pipefail
+
+    k8s_major=$(jq -n -r --arg ver "$INPUT_kubernetes_version" '$ver|split(".")[0]')
+    k8s_minor=$(jq -n -r --arg ver "$INPUT_kubernetes_version" '$ver|split(".")[1]')
+
+    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
+
+    commodore catalog compile "${INPUT_commodore_cluster_id}"\
+      --dynamic-fact kubernetesVersion.major="$k8s_major" \
+      --dynamic-fact kubernetesVersion.minor="$k8s_minor"
+
+    echo "Configuring component talos-capi-cluster-cloudscale..."
+
+    pushd "inventory/classes/${INPUT_commodore_tenant_id}"
+
+    yq -i '.applications = (.applications + ["talos-capi-cluster-cloudscale"] | unique)' \
+      "${INPUT_commodore_cluster_id}.yml"
+
+    api_vip=$(python3 -c \
+      'import ipaddress,sys; print(ipaddress.ip_network(sys.argv[1])[0])' \
+      "${INPUT_talos_api_vip}")
+    export api_vip
+    ingress_vip=$(python3 -c \
+      'import ipaddress,sys; print(ipaddress.ip_network(sys.argv[1])[0])' \
+      "${INPUT_talos_ingress_vip}")
+    export ingress_vip
+    # generic talos configs
+    # TODO(sg): figure out which of them we actually need
+    yq -i '.parameters.talos.apiVIP=strenv(api_vip)' \
+      "${INPUT_commodore_cluster_id}.yml"
+    yq -i '.parameters.talos.ingressVIP=strenv(ingress_vip)' \
+      "${INPUT_commodore_cluster_id}.yml"
+    yq -i '.parameters.talos.baseDomain=strenv(INPUT_base_domain)' \
+      "${INPUT_commodore_cluster_id}.yml"
+
+    export capi_k8s_version="v${INPUT_kubernetes_version}"
+
+    # cloudscale configs
+    yq -i '.parameters.talos_capi_cluster_cloudscale.cloudscaleCluster.spec.floatingIP.address=strenv(api_vip)' \
+      "${INPUT_commodore_cluster_id}.yml"
+    yq -i '.parameters.talos_capi_cluster_cloudscale.cloudscale.privateNetwork.uuid=strenv(INPUT_cloudscale_privnet_uuid)' \
+      "${INPUT_commodore_cluster_id}.yml"
+    yq -i '.parameters.talos_capi_cluster_cloudscale.cloudscale.customImageSlug=strenv(INPUT_custom_image_slug)' \
+      "${INPUT_commodore_cluster_id}.yml"
+
+    # temp override cloudscale credentials for cluster
+    # TODO(sg): figure out canonical secret name
+    yq -i '.parameters.talos_capi_cluster_cloudscale.cloudscaleCluster.spec.credentialsRef.name="capcs-cloudscale"' \
+      "${INPUT_commodore_cluster_id}.yml"
+
+    # talos version configs
+    talosMinor=$(jq -n -r --arg tver "${INPUT_talos_version}" \
+      '$tver | split(".")[0:2] | join(".")')
+    export talosMinor
+    yq -i '.parameters.talos_capi_cluster_cloudscale.talosVersion=strenv(talosMinor)' \
+      "${INPUT_commodore_cluster_id}.yml"
+      yq -i '.parameters.talos_capi_cluster_cloudscale.kubernetesVersion=strenv(capi_k8s_version)' \
+      "${INPUT_commodore_cluster_id}.yml"
+    yq -i '.parameters.talos_capi_cluster_cloudscale.talosSchematicUUID=strenv(INPUT_talos_schematic_uuid)' \
+      "${INPUT_commodore_cluster_id}.yml"
+    # NOTE(sg): this shouldn't hurt for clusters that don't yet use Tuppr
+    yq -i '.parameters.tuppr.talos_upgrades.cluster.spec.talos.version="v"+strenv(INPUT_talos_version)' \
+      "${INPUT_commodore_cluster_id}.yml"
+
+    git commit -am "Configure cluster ${INPUT_commodore_cluster_id}" || echo "No changes to commit"
+    git push origin master
+
+    popd
+
+    # TODO(sg): split step to give the user a change to adjust the config
+    # before provisioning the cluster.
+
+    commodore catalog compile "${INPUT_commodore_cluster_id}"\
+      --dynamic-fact kubernetesVersion.major="$k8s_major" \
+      --dynamic-fact kubernetesVersion.minor="$k8s_minor" \
+      --push
+
+- match: And I create the cluster via cluster API
+  description: |-
+    Deploy cluster API manifests rendered by Commodore to seed cluster.
+  inputs:
+    - name: commodore_cluster_id
+    - name: seed_kubeconfig
+    - name: vault_address
+    - name: vault_login_method
+    - name: ssh_private_key_path
+    - name: kind_gateway_ip
+    - name: jumphost_public_ip
+    - name: jumphost_ed25519_hostkey
+  run: |
+    set -euo pipefail
+
+    "${GANDALF_SPELLBOOK_DIR}/scripts/socks-proxy" \
+      "${INPUT_ssh_private_key_path}" \
+      "${INPUT_kind_gateway_ip}" \
+      "${INPUT_jumphost_public_ip}" \
+      "${INPUT_jumphost_ed25519_hostkey}"
+
+    export KUBECONFIG=${INPUT_seed_kubeconfig}
+
+    export VAULT_ADDR=${INPUT_vault_address}
+    vault login -method=${INPUT_vault_login_method}
+
+    echo "Applying cluster manifests in seed cluster..."
+    kapitan refs --reveal --refs-path catalog/refs -f catalog/manifests/cloudscale-cloud-controller-manager > ccm.yaml
+    kubectl -n syn-cluster-api create configmap "${INPUT_commodore_cluster_id}-ccm" --from-file=ccm.yaml --dry-run=client -oyaml | \
+      kubectl apply --server-side -f -
+    rm ccm.yaml
+    # Omit LB services from cilium ClusterResourceSet -- otherwise we run into
+    # an issue where the CCM creates two cloudscale LBs for the same service.
+    # NOTE(sg): Revert to just omitting ServiceMonitor once cloudscale CCM
+    # 1.3.1 is released.
+    kapitan refs --reveal --refs-path catalog/refs -f catalog/manifests/cilium/01_cilium_helmchart | \
+      #yq -P 'select(.kind != "ServiceMonitor")' > cilium.yaml
+      yq -P 'select(.kind != "ServiceMonitor")|select((.kind == "Service" and .spec.type == "LoadBalancer")|not)' > cilium.yaml
+    kubectl -n syn-cluster-api create configmap "${INPUT_commodore_cluster_id}-cilium" --from-file=cilium.yaml --dry-run=client -oyaml | \
+      kubectl apply --server-side -f -
+    rm cilium.yaml
+    kapitan refs --reveal --refs-path catalog/refs -f catalog/manifests/talos-capi-cluster-cloudscale/capi_cluster.yaml | \
+      kubectl -n syn-cluster-api apply --server-side -f -
+    kapitan refs --reveal --refs-path catalog/refs -f catalog/manifests/talos-capi-cluster-cloudscale/worker_group_*.yaml | \
+      kubectl -n syn-cluster-api apply --server-side -f -
+
+    echo "✅ Cluster API manifests applied to seed cluster."
+
+- match: And wait for the Talos cluster to become ready
+  description: |-
+    Wait for the Talos cluster to become ready in Cluster API and approve CSRs
+    for initial Kubelet serving certificates.
+
+    During regular operation approving Kubelet serving CSRs will be done by
+    the csr-auto-approver. TBD if we want to install the auto-approver during
+    bootstrap instead of doing the initial approvals here.
+  inputs:
+    - name: seed_kubeconfig
+    - name: commodore_cluster_id
+    - name: ssh_private_key_path
+    - name: kind_gateway_ip
+    - name: jumphost_public_ip
+    - name: jumphost_ed25519_hostkey
+  outputs:
+    - name: talos_kubeconfig
+  run: |
+    set -euo pipefail
+
+    export KUBECONFIG="${INPUT_seed_kubeconfig}"
+
+    "${GANDALF_SPELLBOOK_DIR}/scripts/socks-proxy" \
+      "${INPUT_ssh_private_key_path}" \
+      "${INPUT_kind_gateway_ip}" \
+      "${INPUT_jumphost_public_ip}" \
+      "${INPUT_jumphost_ed25519_hostkey}"
+
+    echo "Waiting up to 15 minutes for the Talos cluster to become available..."
+    kubectl -n syn-cluster-api wait --for=condition=Available cluster/${INPUT_commodore_cluster_id} --timeout=900s
+    echo "✅ Cluster is ready."
+
+    echo "Fetching Talos cluster kubeconfig from Seed cluster..."
+    export TALOS_KUBECONFIG="${INPUT_commodore_cluster_id}.kubeconfig"
+    clusterctl -n syn-cluster-api \
+      get kubeconfig "${INPUT_commodore_cluster_id}" > "$TALOS_KUBECONFIG"
+    env -i "talos_kubeconfig=$TALOS_KUBECONFIG" >> "$OUTPUT"
+
+    echo "Approving pending Kubelet serving certificate CSRs..."
+    # NOTE(sg): As far as I can tell, all Kubelet serving cert CSRs exist by
+    # the time the CAPI cluster reports ready. TODO: double check this.
+    machine_names=$(kubectl -n syn-cluster-api get machines \
+      -o json | jq -r '[.items[]|"system:node:\(.metadata.name)"]')
+    for kubelet_csr in $(kubectl --kubeconfig="${TALOS_KUBECONFIG}" get csr \
+      --field-selector spec.signerName=kubernetes.io/kubelet-serving -ojson \
+      | jq -r --argjson machine_names "$machine_names" \
+        '.items[] |. as $csr
+        | select($machine_names|contains([$csr.spec.username]))
+        | select(.status|length == 0)
+        | "\(.metadata.name);\(.spec.username)"')
+    do
+      echo "Approving Kubelet serving cert CSR ${kubelet_csr/;*} for ${kubelet_csr/*;}"
+      kubectl --kubeconfig="${TALOS_KUBECONFIG}" certificate approve "${kubelet_csr/;*}"
+    done
+    echo "✅ Done."
+
+- match: Then I bootstrap the cluster API providers on the Talos cluster
+  description: |-
+    Get a kubeconfig for the Talos cluster and move the Cluster API configuration of the cluster to itself.
+  inputs:
+    - name: commodore_cluster_id
+    - name: cloudscale_token
+    - name: cacppt_image
+    - name: capcs_image
+    - name: talos_kubeconfig
+  run: |
+    set -euo pipefail
+
+    export KUBECONFIG="${INPUT_talos_kubeconfig}"
+
+    echo "Installing Project Syn cert-manager instance..."
+    kubectl apply -f catalog/manifests/cert-manager/00_namespace.yaml
+    kapitan refs --reveal --refs-path catalog/refs \
+      -f catalog/manifests/cert-manager/10_cert_manager | \
+      yq 'select(.apiVersion != "monitoring.coreos.com/v1")' | \
+      kubectl apply -f -
+    kubectl wait -n syn-cert-manager --for=condition=available \
+      deploy/cert-manager deploy/cert-manager-webhook
+    echo "✅ Project Syn cert-manager is ready."
+
+    echo -e "\n\nInstalling Cluster API providers..."
+    export CLOUDSCALE_API_TOKEN="${INPUT_cloudscale_token}"
+    # TODO(sg): replace with CAPI init on Talos from Syn manifests
+    clusterctl init \
+      -n syn-cluster-api \
+      --bootstrap talos \
+      --control-plane talos \
+      --infrastructure cloudscale-ch-cloudscale
+    echo "✅ Cluster API initialized."
+
+    if [ "${INPUT_cacppt_image}" != "none" ]; then
+      echo "Upgrading Talos control plane CAPI provider to CAPI 1.13 feature branch..."
+      image_patch=$(jq -n -r --arg image "$INPUT_cacppt_image" '[{
+        "op": "replace",
+        "path": "/spec/template/spec/containers/0/image",
+        "value": $image
+      }]')
+      kubectl apply --server-side --force-conflicts \
+        -f "${GANDALF_SPELLBOOK_DIR}/manifests/cacppt-crds.yaml"
+      kubectl apply --server-side --force-conflicts \
+        -f "${GANDALF_SPELLBOOK_DIR}/manifests/cacppt-clusterrole.yaml"
+      kubectl apply --server-side --force-conflicts \
+        -f "${GANDALF_SPELLBOOK_DIR}/manifests/cacppt-webhooks.yaml"
+      kubectl -n syn-cluster-api patch deployment/cacppt-controller-manager \
+        --type=json --patch "$image_patch"
+
+      echo "Waiting for Talos control plane CAPI provider rollout..."
+      kubectl wait --for=condition=Available -n syn-cluster-api deployment/cacppt-controller-manager
+      echo "✅ Talos control plane CAPI provider updated."
+    fi
+
+    if [ "${INPUT_capcs_image}" != "none" ]; then
+      echo "Patching image for cloudscale CAPI provider..."
+      image_patch=$(jq -n -r --arg image "${INPUT_capcs_image}" '[{
+        "op": "replace",
+        "path": "/spec/template/spec/containers/0/image",
+        "value": $image
+      }]')
+      kubectl -n syn-cluster-api patch deployment/capcs-controller-manager \
+        --type=json --patch "$image_patch"
+
+      echo "Waiting for cloudscale CAPI provider rollout..."
+      kubectl wait --for=condition=Available -n syn-cluster-api deployment/capcs-controller-manager
+      echo "✅ cloudscale CAPI provider updated."
+    fi
+
+- match: And I move the cluster API cluster to the Talos cluster
+  description: |-
+    Use `clusterctl move` to move the bootstrapped cluster API cluster to the Talos cluster.
+
+    NOTE: This step can't be retried if it's interrupted.
+  inputs:
+  - name: seed_kubeconfig
+  - name: talos_kubeconfig
+  - name: commodore_cluster_id
+  run: |
+    set -euo pipefail
+    echo "Move cluster API cluster manifests to the Talos cluster..."
+    clusterctl move -n syn-cluster-api --kubeconfig "${INPUT_seed_kubeconfig}" --to-kubeconfig "${INPUT_talos_kubeconfig}"
+
+    echo "Wait for cluster API cluster to become available on the Talos cluster..."
+    export KUBECONFIG="${INPUT_talos_kubeconfig}"
+    kubectl -n syn-cluster-api wait --for=condition=Available cluster/${INPUT_commodore_cluster_id} --timeout=180s
+    echo "✅ CAPI cluster has been moved to the Talos cluster successfully."
+
+- match: And delete the Kind cluster
+  inputs:
+    - name: commodore_cluster_id
+    - name: seed_kubeconfig
+  run: |
+    set -euo pipefail
+    kind delete cluster --name capi-seed-${INPUT_commodore_cluster_id}
+    rm ${INPUT_seed_kubeconfig}

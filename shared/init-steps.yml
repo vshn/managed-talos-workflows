@@ -1,0 +1,105 @@
+spells:
+- match: And a Lieutenant cluster
+  description: |-
+    This step retrieves the Commodore tenant ID associated with the given lieutenant cluster ID.
+
+    Use https://api.syn.vshn.net as the Commodore API URL for production clusters.
+    You might use the WebUI at https://control.vshn.net/syn/lieutenantapiendpoints to create and manage your clusters.
+
+    For customer clusters ensure the following facts are set:
+    * sales_order: Name of the sales order to which the cluster is billed, such as S10000
+    * service_level: Name of the service level agreement for this cluster, such as guaranteed-availability
+    * access_policy: Access-Policy of the cluster, such as regular or swissonly
+    * release_channel: Name of the Project Syn component release channel to use, such as stable
+    * maintenance_window: Pick the appropriate upgrade schedule, such as monday-1400 for test clusters, tuesday-1000 for prod or custom to not (yet) enable maintenance
+
+    This step checks that you have access to the Commodore API and the cluster ID is valid.
+  inputs:
+  - name: commodore_api_url
+    description: |-
+      URL of the Commodore API to use for retrieving cluster information.
+
+      Use https://api.syn.vshn.net as the Commodore API URL for production clusters.
+      Use https://api-int.syn.vshn.net for test clusters.
+
+      You might use the WebUI at https://control.vshn.net/syn/lieutenantapiendpoints to create and manage your clusters.
+
+  - name: commodore_cluster_id
+    description: |-
+      Project Syn cluster ID for the cluster to be set up.
+
+      In the form of c-example-infra-prod1.
+
+      You might use the WebUI at https://control.vshn.net/syn/lieutenantapiendpoints to create and manage your clusters.
+  outputs:
+  - name: commodore_tenant_id
+  - name: vault_address
+  - name: vault_login_method
+  - name: csp_region
+  run: |
+    set -euo pipefail
+    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
+
+    echo "Retrieving Commodore tenant ID for cluster ID '$INPUT_commodore_cluster_id' from API at '$INPUT_commodore_api_url'..."
+    tenant_id=$(curl -sH "Authorization: Bearer $(commodore fetch-token)" ${COMMODORE_API_URL}/clusters/${INPUT_commodore_cluster_id} | jq -r .tenant)
+    if echo "$tenant_id" | grep 't-' >/dev/null 2>&1 ; then { echo "✅ Retrieved tenant ID '$tenant_id' for cluster ID '$INPUT_commodore_cluster_id'."; } else { echo "❌ Failed to retrieve valid tenant ID for cluster ID '$INPUT_commodore_cluster_id'. Got '$tenant_id'. Please check your Commodore API access and cluster ID."; exit 1; } ; fi
+    env -i "commodore_tenant_id=$tenant_id" >> "$OUTPUT"
+
+    region=$(curl -sH "Authorization: Bearer $(commodore fetch-token)" ${COMMODORE_API_URL}/clusters/${INPUT_commodore_cluster_id} | jq -r .facts.region)
+    if test -z "$region" || test "$region" == "null" ; then { echo "❌ Failed to retrieve CSP region for cluster ID '$INPUT_commodore_cluster_id'."; exit 1; } ; else { echo "✅ Retrieved CSP region '$region' for cluster ID '$INPUT_commodore_cluster_id'."; } ; fi
+    env -i "csp_region=$region" >> "$OUTPUT"
+
+    echo "Retrieving Vault address and login method..."
+    vault_addr=$(curl -s "${COMMODORE_API_URL}" | jq -r '.vault.addr')
+    if test -z "$vault_addr" || test "$vault_addr" == "null"; then echo "❌ Failed to retrieve Vault address from Lieutenant at '${COMMODORE_API_URL}'."; exit 1; else echo "✅ Retrieved Vault address '${vault_addr}' for Lieutenant at '${COMMODORE_API_URL}'."; fi
+    env -i "vault_address=${vault_addr}" >> "$OUTPUT"
+    vault_login_method=$(curl -s "${COMMODORE_API_URL}" | jq -r '.vault.loginMethod')
+    if test -z "$vault_login_method" || test "$vault_login_method" == "null"; then echo "❌ Failed to retrieve Vault login method from Lieutenant at '${COMMODORE_API_URL}'."; exit 1; else echo "✅ Retrieved Vault login method '${vault_login_method}' for Lieutenant at '${COMMODORE_API_URL}'."; fi
+    env -i "vault_login_method=${vault_login_method}" >> "$OUTPUT"
+
+    echo "Setting fact 'talos_manager=capi' on Lieutenant cluster..."
+    if ! curl -sfSL -H "Authorization: Bearer $(commodore fetch-token)" \
+      -X PATCH -H "Content-Type: application/merge-patch+json" \
+      "${COMMODORE_API_URL}/clusters/${INPUT_commodore_cluster_id}" \
+      --data '{"facts":{"talos_manager":"capi"}}' \
+      -o /dev/null; then
+      echo "❌ Failed to set 'talos_manager' fact for cluster '${INPUT_commodore_cluster_id}'."
+      exit 1
+    else
+      echo "✅ Set 'talos_manager=capi' for cluster '${INPUT_commodore_cluster_id}'."
+    fi
+
+- match: And a Keycloak service
+  description: |-
+    In this step, you have to create a Keycloak service for the new cluster
+    via the VSHN Control Web UI at https://control.vshn.net/vshn/services/_create 
+  inputs:
+  - name: commodore_cluster_id
+  run: |
+    echo '#########################################################'
+    echo '#                                                       #'
+    echo "#  Please create a Keycloak service with the cluster's  #"
+    echo '#  ID as Service Name via the VSHN Control Web UI.      #'
+    echo '#                                                       #'
+    echo '#########################################################'
+    echo
+    echo "The name and ID of the service should be ${INPUT_commodore_cluster_id}."
+    echo "You can go to https://control.vshn.net/vshn/services/_create"
+    sleep 1
+
+- match: And basic cluster information
+  description: |-
+    This step collects an essential piece of information required for cluster setup: the base domain for the cluster.
+
+    See https://kb.vshn.ch/talos/explanations/dns_scheme.html for more information about the base domain.
+  inputs:
+  - name: base_domain
+    description: |-
+      The base domain for the cluster without the cluster ID prefix and the last dot.
+
+      Example: `appuio-beta.ch`
+
+      See https://kb.vshn.ch/talos/explanations/dns_scheme.html for more information about the base domain.
+  run: |
+    set -euo pipefail
+    echo "Base domain set to ${INPUT_base_domain}".

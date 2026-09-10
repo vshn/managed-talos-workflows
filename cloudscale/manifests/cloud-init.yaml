@@ -1,0 +1,20 @@
+#cloud-config
+final_message: System is up after $UPTIME seconds
+network:
+  config: disabled
+runcmd:
+- - rm
+  - -f
+  - /etc/netplan/50-cloud-init.yaml
+- - netplan
+  - apply
+timezone: Europe/Zurich
+warnings:
+  dsid_missing_source: 'off'
+write_files:
+  - content: |
+      network:
+        config: disabled
+    owner: root:root
+    path: /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+    permissions: '0600'

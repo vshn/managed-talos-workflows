@@ -1,0 +1,85 @@
+spells:
+- match: Then I synthesize the cluster
+  description: |-
+    This step enables Project Syn on the cluster.
+  inputs:
+  - name: commodore_api_url
+  - name: commodore_cluster_id
+  - name: talos_kubeconfig
+  run: |
+    set -euo pipefail
+
+    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
+    export KUBECONFIG="${INPUT_talos_kubeconfig}"
+    LIEUTENANT_AUTH="Authorization:Bearer $(commodore fetch-token)"
+
+    if ! kubectl get deploy -n syn steward > /dev/null; then
+      INSTALL_URL=$(curl -H "${LIEUTENANT_AUTH}" "${COMMODORE_API_URL}/clusters/${INPUT_commodore_cluster_id}" | jq -r ".installURL")
+
+      if [[ $INSTALL_URL == "null" ]]
+      # TODO(aa): consider doing this programmatically - especially if, at a later point, we add the lieutenant kubeconfig to the inputs anyway
+      then
+          echo '###################################################################################'
+          echo '#                                                                                 #'
+          echo '#  Could not fetch install URL! Please reset the bootstrap token and try again.   #'
+          echo '#                                                                                 #'
+          echo '###################################################################################'
+          echo
+          echo 'See https://kb.vshn.ch/corp-tech/projectsyn/explanation/bootstrap-token.html#_resetting_the_bootstrap_token'
+          sleep 0.1
+          exit 1
+      fi
+      echo "# Deploying steward ..."
+      kubectl create -f "$INSTALL_URL"
+    fi
+
+    echo "# Waiting for ArgoCD resource to exist ..."
+    kubectl wait --for=create crds/argocds.argoproj.io --timeout=5m
+    echo "✅ ArgoCD custom resource created."
+    echo "# Waiting for ArgoCD resource to become ready ..."
+    kubectl wait --for=condition=NamesAccepted=True crd argocds.argoproj.io --timeout=60s
+    kubectl wait --for=condition=Established=True crd argocds.argoproj.io --timeout=60s
+    echo "✅ ArgoCD custom resource ready."
+
+    echo "# Refreshing local Kubernetes API cache ..."
+    kubectl api-resources --api-group=argoproj.io
+
+    echo "# Waiting for ArgoCD instance to exist ..."
+    kubectl wait --for=create argocd/syn-argocd -nsyn --timeout=90s
+    echo "✅ ArgoCD instance created."
+
+    echo "# Waiting for ArgoCD instance to be ready ..."
+    kubectl wait --for=jsonpath='{.status.phase}'=Available argocd/syn-argocd -nsyn --timeout=5m
+    echo "✅ ArgoCD instance ready."
+
+    echo "✅ Done."
+
+- match: And I wait until all ArgoCD apps are synced and healthy
+  description: |-
+    Wait until all ArgoCD applications are synced and healthy.
+  inputs:
+    - name: talos_kubeconfig
+  run: |
+    set -euo pipefail
+
+    export KUBECONFIG="${INPUT_talos_kubeconfig}"
+
+    sync_timeout=600s
+    healthy_timeout=300s
+
+    echo "Wait until all ArgoCD apps are synced... (timeout=${sync_timeout})"
+    if ! kubectl -n syn wait --for jsonpath='{.status.sync.status}="Synced"' \
+      applications.argoproj.io --all --timeout="${sync_timeout}"; then
+      echo "❌ Wait for ArgoCD app sync timed out, check status manually!"
+    else
+      echo "✅ All ArgoCD apps synced"
+    fi
+
+
+    echo "Wait until all ArgoCD apps are healthy... (timeout=${healthy_timeout})"
+    if ! kubectl -n syn wait --for jsonpath='{.status.health.status}="Healthy"' \
+      applications.argoproj.io --all --timeout="${healthy_timeout}"; then
+      echo "❌ Wait for ArgoCD app health timed out, check status manually!"
+    else
+      echo "✅ Cluster synthesis complete. All ArgoCD apps healthy."
+    fi
