@@ -128,7 +128,7 @@ spells:
         "ssh_keys": [ $ssh_public_key ],
         "user_data": $user_data,
         "tags": {
-          "cluster-id": $cluster_id
+          "cluster_id": $cluster_id
         }
       }')
 
