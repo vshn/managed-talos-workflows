@@ -1,0 +1,217 @@
+spells:
+- match: And I select the cluster to decommission
+  description: |-
+    Provide the Project Syn cluster ID of the cluster to decommission.
+
+  inputs:
+    - name: commodore_api_url
+      description: |-
+        URL of the Commodore API on which the cluster is registered.
+
+        Usually https://api.syn.vshn.net for production clusters.
+        Usually https://api-int.syn.vshn.net for test clusters.
+    - name: commodore_cluster_id
+      description: |-
+        The Project Syn ID of the cluster to decommission.
+  outputs:
+    - name: talos_kubeconfig
+    - name: csp_region
+    - name: vault_address
+    - name: vault_login_method
+    - name: commodore_tenant_id
+  run: |
+    set -euo pipefail
+
+    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
+
+    echo "Retrieving Vault address and login method..."
+    vault_addr=$(curl -s "${COMMODORE_API_URL}" | jq -r '.vault.addr')
+    if test -z "$vault_addr" || test "$vault_addr" == "null"; then echo "❌ Failed to retrieve Vault address from Lieutenant at '${COMMODORE_API_URL}'."; exit 1; else echo "✅ Retrieved Vault address '${vault_addr}' for Lieutenant at '${COMMODORE_API_URL}'."; fi
+    env -i "vault_address=${vault_addr}" >> "$OUTPUT"
+    vault_login_method=$(curl -s "${COMMODORE_API_URL}" | jq -r '.vault.loginMethod')
+    if test -z "$vault_login_method" || test "$vault_login_method" == "null"; then echo "❌ Failed to retrieve Vault login method from Lieutenant at '${COMMODORE_API_URL}'."; exit 1; else echo "✅ Retrieved Vault login method '${vault_login_method}' for Lieutenant at '${COMMODORE_API_URL}'."; fi
+    env -i "vault_login_method=${vault_login_method}" >> "$OUTPUT"
+
+    echo "Fetching cluster '${INPUT_commodore_cluster_id}' from Lieutenant..."
+    cluster_json=$(curl -fsSL -H"Authorization: Bearer $(commodore fetch-token)" \
+      "${INPUT_commodore_api_url}/clusters/${INPUT_commodore_cluster_id}")
+
+    echo "Extracting Project Syn tenant ID for '${INPUT_commodore_cluster_id}'..."
+    tenant=$(jq -n -r --argjson cluster "$cluster_json" '$cluster.tenant')
+    env -i "commodore_tenant_id=$tenant" >> "$OUTPUT"
+
+    region=$(jq -n -r --argjson cluster "$cluster_json" '$cluster.facts.region')
+    if test -z "$region" || test "$region" == "null" ; then { echo "❌ Failed to retrieve CSP region for cluster ID '$INPUT_commodore_cluster_id'."; exit 1; } ; else { echo "✅ Retrieved CSP region '$region' for cluster ID '$INPUT_commodore_cluster_id'."; } ; fi
+    env -i "csp_region=$region" >> "$OUTPUT"
+
+    echo "Extracting apps domain for cluster '${INPUT_commodore_cluster_id}'."
+    apps_domain=$(jq -n -r --argjson cluster "$cluster_json" '$cluster.dynamicFacts.talosAppsDomain')
+    echo "Fetching kubeconfig for cluster '${INPUT_commodore_cluster_id}' from 'https://kubeconfig.${apps_domain}'."
+    curl -fsSLo "${INPUT_commodore_cluster_id}.kubeconfig" \
+      "https://kubeconfig.${apps_domain}/kubeconfig"
+    env -i "talos_kubeconfig=./${INPUT_commodore_cluster_id}.kubeconfig" >> "$OUTPUT"
+    echo "✅ Got kubeconfig for '${INPUT_commodore_cluster_id}'."
+    export KUBECONFIG="${INPUT_commodore_cluster_id}.kubeconfig"
+    if ! kubectl get nodes; then echo "❌ Unable to access cluster with downloaded kubeconfig, check manually."; else echo "✅ Cluster access works with downloaded kubeconfig."; fi
+
+- match: And I compile the cluster catalog
+  description: |-
+    This step compiles the catalog to ensure you have a local checkout of the cluster repository
+    during decommissioning.
+  inputs:
+  - name: commodore_api_url
+  - name: commodore_cluster_id
+  - name: commodore_tenant_id
+  outputs:
+  - name: base_domain
+  run: |
+    set -euo pipefail
+    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
+    commodore catalog compile ${INPUT_commodore_cluster_id}
+
+    base_domain=$(kapitan inventory --inventory-backend=reclass-rs -t cluster |\
+      yq '.parameters.talos.baseDomain')
+    if test -z "$base_domain" || test "$base_domain" == "null"; then echo "❌ Failed to extract base domain from cluster inventory."; else echo "✅ Extracted base domain '${base_domain}' from cluster inventory."; fi
+    env -i "base_domain=$base_domain" >> "$OUTPUT"
+
+- match: Then I confirm cluster deletion
+  description: |-
+    This step asks you to confirm with 4 eyes whether this cluster is really to be deleted.
+  inputs:
+  - name: commodore_cluster_id
+  - name: 4_eye_confirmation
+    description: |-
+      Please confirm the commodore cluster ID of the cluster you wish to delete.
+
+      Confirm this cluster ID according to the 4-eye principle. You and one colleague should agree on the cluster that is to be deleted.
+  run: |
+    set -euo pipefail
+    if [[ "${INPUT_commodore_cluster_id}" != "${INPUT_4_eye_confirmation}" ]]
+    then
+      echo "Cluster domain and confirmation do not match."
+      exit 1
+    fi
+
+- match: Then I disable ArgoCD on the cluster
+  description: |-
+    Disable Project Syn ArgoCD, so we can cleanly move the CAPI cluster.
+  inputs:
+    - name: talos_kubeconfig
+  run: |
+    set -euo pipefail
+
+    echo "Scaling down ArgoCD components..."
+    export KUBECONFIG=${INPUT_talos_kubeconfig}
+    kubectl -n syn-argocd-operator scale deploy --all --replicas=0
+    kubectl -n syn-argocd-operator wait --for=jsonpath='{status.terminatingReplicas}=0' deployment/syn-argocd-operator-controller-manager
+    kubectl -n syn scale deploy --all --replicas=0
+    kubectl -n syn scale sts --all --replicas=0
+    kubectl -n syn wait --for jsonpath='{status.terminatingReplicas}=0' deploy --all --timeout=180s
+    kubectl -n syn wait --for jsonpath='{status.replicas}=0' sts --all
+    echo "✅ ArgoCD scaled down"
+
+- match: And I move the Talos cluster to the Kind cluster
+  inputs:
+    - name: seed_kubeconfig
+    - name: talos_kubeconfig
+    - name: commodore_cluster_id
+  run: |
+    set -euo pipefail
+    echo "Move cluster API cluster manifests from the Talos cluster..."
+    clusterctl move -n syn-cluster-api --kubeconfig "${INPUT_talos_kubeconfig}" --to-kubeconfig "${INPUT_seed_kubeconfig}"
+    echo "✅ Cluster API cluster manifests moved."
+
+    echo "Wait cluster API cluster to become available on the Kind cluster..."
+    export KUBECONFIG="${INPUT_seed_kubeconfig}"
+    kubectl -n syn-cluster-api wait --for=condition=Available cluster/${INPUT_commodore_cluster_id} --timeout=180s
+    echo "✅ Moved Cluster API cluster ready."
+
+- match: Then I delete the Talos cluster via Cluster API
+  inputs:
+    - name: seed_kubeconfig
+    - name: commodore_cluster_id
+  run: |
+    set -euo pipefail
+    export KUBECONFIG=${INPUT_seed_kubeconfig}
+    echo "Deleting cluster API cluster..."
+    kubectl -n syn-cluster-api delete cluster ${INPUT_commodore_cluster_id}
+    echo "✅ Cluster API cluster deleted."
+
+- match: Then I delete the cluster's Vault secrets
+  description: |-
+    This step cleans up all the cluster's Vault secrets.
+  inputs:
+  - name: commodore_cluster_id
+  - name: commodore_api_url
+  - name: vault_address
+  - name: vault_login_method
+  - name: backup_deletion_confirmation
+  run: |
+    set -euo pipefail
+    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
+
+    LIEUTENANT_AUTH="Authorization: Bearer $(commodore fetch-token)"
+    REPO_URL=$(curl -sH "${LIEUTENANT_AUTH}" "${INPUT_commodore_api_url}/clusters/${INPUT_commodore_cluster_id}" | jq -r .gitRepo.url)
+
+    if [ -e catalog ]
+    then
+      rm -rf catalog
+    fi
+
+    mkdir catalog
+    git archive --remote "${REPO_URL}" master | tar -xC catalog
+
+    PASSWORD_KEY="$(yq -o=json 'select(.kind == "Secret" and .metadata.name == "objects-backup-password") | .stringData.password' catalog/manifests/cluster-backup/10_object.yaml | cut -d: -f2)"
+    ID_KEY="$(yq -o=json 'select(.kind == "Secret" and .metadata.name == "objects-backup-s3-credentials") | .stringData.username' catalog/manifests/cluster-backup/10_object.yaml | cut -d: -f2)"
+    SECRET_KEY="$(yq -o=json 'select(.kind == "Secret" and .metadata.name == "objects-backup-s3-credentials") | .stringData.password' catalog/manifests/cluster-backup/10_object.yaml | cut -d: -f2)"
+
+    export VAULT_ADDR=${INPUT_vault_address}
+    vault login -method=${INPUT_vault_login_method}
+
+    for secret in $(find catalog/refs/ -type f \
+      | sed -r -e 's#catalog/refs#clusters/kv#' -e 's#(.*)/.*#\1#' \
+      | grep -v '__shared__/__shared__' \
+      | sort -u);
+    do
+      if [[ ${INPUT_backup_deletion_confirmation} == "YES" ]]
+      then
+        vault kv delete "$secret"
+      else
+        # exclude backup credentials because the backup still exists
+        if echo "$PASSWORD_KEY $ID_KEY $SECRET_KEY" | grep "${secret##clusters/kv/}" > /dev/null
+        then
+          echo "Skipping key '$secret' as it is required to access cluster backups."
+        else
+          vault kv delete "$secret"
+        fi
+      fi
+    done
+
+- match: And I delete the cluster from Lieutenant
+  description: |-
+    This step deletes the cluster from Lieutenant
+  inputs:
+  - name: commodore_cluster_id
+  - name: commodore_api_url
+  run: |
+    set -euo pipefail
+    echo "Deleting cluster on Lieutenant at ${INPUT_commodore_api_url} ..."
+    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
+    curl -H "Authorization: Bearer $(commodore fetch-token)" -XDELETE \
+      "${INPUT_commodore_api_url%/}/clusters/${INPUT_commodore_cluster_id}"
+
+- match: And I delete the Keycloak service
+  inputs:
+  - name: commodore_cluster_id
+  description: |-
+    This step deletes the cluster's keycloak service from control.vshn.net
+  run: |
+    set -euo pipefail
+    echo '##############################################################################'
+    echo '#                                                                            #'
+    echo "#  Please manually delete the cluster's keycloak service before proceeding.  #"
+    echo '#                                                                            #'
+    echo '##############################################################################'
+    echo
+    echo You can go to https://control.vshn.net/vshn/services/${INPUT_commodore_cluster_id}/delete
+    sleep 2
