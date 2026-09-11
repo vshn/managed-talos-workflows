@@ -277,19 +277,17 @@ spells:
 
     pushd "inventory/classes/${INPUT_commodore_tenant_id}"
 
-    yq -i '.applications = (.applications + ["talos-capi-cluster-cloudscale"] | unique)' \
-      "${INPUT_commodore_cluster_id}.yml"
-
     api_vip=$(python3 -c \
       'import ipaddress,sys; print(ipaddress.ip_network(sys.argv[1])[0])' \
       "${INPUT_talos_api_vip}")
-    export api_vip
     ingress_vip=$(python3 -c \
       'import ipaddress,sys; print(ipaddress.ip_network(sys.argv[1])[0])' \
       "${INPUT_talos_ingress_vip}")
+
+    export api_vip
     export ingress_vip
+
     # generic talos configs
-    # TODO(sg): figure out which of them we actually need
     yq -i '.parameters.talos.apiVIP=strenv(api_vip)' \
       "${INPUT_commodore_cluster_id}.yml"
     yq -i '.parameters.talos.ingressVIP=strenv(ingress_vip)' \
@@ -297,33 +295,18 @@ spells:
     yq -i '.parameters.talos.baseDomain=strenv(INPUT_base_domain)' \
       "${INPUT_commodore_cluster_id}.yml"
 
-    export capi_k8s_version="v${INPUT_kubernetes_version}"
-
     # cloudscale configs
-    yq -i '.parameters.talos_capi_cluster_cloudscale.cloudscaleCluster.spec.floatingIP.address=strenv(api_vip)' \
-      "${INPUT_commodore_cluster_id}.yml"
     yq -i '.parameters.talos_capi_cluster_cloudscale.cloudscale.privateNetwork.uuid=strenv(INPUT_cloudscale_privnet_uuid)' \
       "${INPUT_commodore_cluster_id}.yml"
     yq -i '.parameters.talos_capi_cluster_cloudscale.cloudscale.customImageSlug=strenv(INPUT_custom_image_slug)' \
       "${INPUT_commodore_cluster_id}.yml"
 
-    # temp override cloudscale credentials for cluster
-    # TODO(sg): figure out canonical secret name
-    yq -i '.parameters.talos_capi_cluster_cloudscale.cloudscaleCluster.spec.credentialsRef.name="capcs-cloudscale"' \
-      "${INPUT_commodore_cluster_id}.yml"
-
     # talos version configs
-    talosMinor=$(jq -n -r --arg tver "${INPUT_talos_version}" \
-      '$tver | split(".")[0:2] | join(".")')
-    export talosMinor
-    yq -i '.parameters.talos_capi_cluster_cloudscale.talosVersion=strenv(talosMinor)' \
+    yq -i '.parameters.talos_capi_cluster_cloudscale.talosVersion=strenv(INPUT_talos_version)' \
       "${INPUT_commodore_cluster_id}.yml"
-      yq -i '.parameters.talos_capi_cluster_cloudscale.kubernetesVersion=strenv(capi_k8s_version)' \
+    yq -i '.parameters.talos_capi_cluster_cloudscale.kubernetesVersion="v"+strenv(INPUT_kubernetes_version)' \
       "${INPUT_commodore_cluster_id}.yml"
     yq -i '.parameters.talos_capi_cluster_cloudscale.talosSchematicUUID=strenv(INPUT_talos_schematic_uuid)' \
-      "${INPUT_commodore_cluster_id}.yml"
-    # NOTE(sg): this shouldn't hurt for clusters that don't yet use Tuppr
-    yq -i '.parameters.tuppr.talos_upgrades.cluster.spec.talos.version="v"+strenv(INPUT_talos_version)' \
       "${INPUT_commodore_cluster_id}.yml"
 
     git commit -am "Configure cluster ${INPUT_commodore_cluster_id}" || echo "No changes to commit"
