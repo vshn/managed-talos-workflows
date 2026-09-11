@@ -196,7 +196,9 @@ spells:
 
 - match: And I install cluster API in the Kind cluster
   description: |-
-    Install cluster API components on the seed cluster
+    Install cluster API components on the seed cluster.
+
+    The step uses the cert-manager and CAPI manifests rendered by Commodore.
   inputs:
     - name: cloudscale_token
     - name: ssh_private_key_path
@@ -205,20 +207,8 @@ spells:
     - name: jumphost_ed25519_hostkey
     - name: seed_kubeconfig
     - name: jumphost_proxy_string
-    - name: cacppt_image
-      description: |-
-        This input controls whether the spell patches the CAPI Talos control plane provider.
-
-        Use `none` if you don't need a custom provider build.
-
-        Provide a valid container image if you need a custom provider build.
-    - name: capcs_image
-      description: |-
-        This input controls whether the spell patches the CAPI cloudscale provider.
-
-        Use `none` if you don't need a custom provider build.
-
-        Provide a valid container image if you need a custom provider build.
+    - name: vault_address
+    - name: vault_login_method
   run: |
     set -euo pipefail
 
@@ -228,23 +218,12 @@ spells:
       "${INPUT_jumphost_public_ip}" \
       "${INPUT_jumphost_ed25519_hostkey}"
 
-    # TODO(sg): switch this to deploying the manifests rendered by Commodore
-    # once we have component-cluster-api? Would also need to deploy
-    # cert-manager somehow.
-
     export KUBECONFIG="${INPUT_seed_kubeconfig}"
-    if ! kubectl get ns syn-cluster-api &>/dev/null; then
-      echo "Installing cluster API providers on Kind seed cluster..."
-      export CLOUDSCALE_API_TOKEN="${INPUT_cloudscale_token}"
-      clusterctl init \
-        -n syn-cluster-api \
-        --bootstrap talos \
-        --control-plane talos \
-        --infrastructure cloudscale-ch-cloudscale
-      echo "✅ Cluster API initialized successfully."
-    else
-      echo "✅ Namespace syn-cluster-api already exists on seed cluster, assuming that CAPI is already installed..."
-    fi
+
+    export VAULT_ADDR=${INPUT_vault_address}
+    vault login -method=${INPUT_vault_login_method}
+
+    "${GANDALF_SPELLBOOK_DIR}/scripts/install-capi.sh"
 
     # NOTE(sg): We only add the Kind Pod CIDR, service CIDR and node IP(s) to
     # the cacppt no_proxy variable. The cacppt controller doesn't require any
@@ -256,7 +235,6 @@ spells:
           | join(",") as $node_ips
           | "\($no_proxy),\($node_ips)"')
 
-
     echo "Patching Talos control plane CAPI provider with SOCKS5 proxy..."
     kubectl -n syn-cluster-api set env deployment/cacppt-controller-manager \
       http_proxy="${INPUT_jumphost_proxy_string}" \
@@ -264,42 +242,6 @@ spells:
       no_proxy="${cacppt_no_proxy}"
     kubectl wait --for=condition=Available -n syn-cluster-api deployment/cacppt-controller-manager
     echo "✅ Talos control plane CAPI provider configured with SOCKS5 proxy."
-
-    if [ "${INPUT_cacppt_image}" != "none" ]; then
-      echo "Upgrading Talos control plane CAPI provider to CAPI 1.13 feature branch..."
-      image_patch=$(jq -n -r --arg image "$INPUT_cacppt_image" '[{
-        "op": "replace",
-        "path": "/spec/template/spec/containers/0/image",
-        "value": $image
-      }]')
-      kubectl apply --server-side --force-conflicts \
-        -f "${GANDALF_SPELLBOOK_DIR}/manifests/cacppt-crds.yaml"
-      kubectl apply --server-side --force-conflicts \
-        -f "${GANDALF_SPELLBOOK_DIR}/manifests/cacppt-clusterrole.yaml"
-      kubectl apply --server-side --force-conflicts \
-        -f "${GANDALF_SPELLBOOK_DIR}/manifests/cacppt-webhooks.yaml"
-      kubectl -n syn-cluster-api patch deployment/cacppt-controller-manager \
-        --type=json --patch "$image_patch"
-
-      echo "Waiting for Talos control plane CAPI provider rollout..."
-      kubectl wait --for=condition=Available -n syn-cluster-api deployment/cacppt-controller-manager
-      echo "✅ Talos control plane CAPI provider updated."
-    fi
-
-    if [ "${INPUT_capcs_image}" != "none" ]; then
-      echo "Patching image for cloudscale CAPI provider..."
-      image_patch=$(jq -n -r --arg image "${INPUT_capcs_image}" '[{
-        "op": "replace",
-        "path": "/spec/template/spec/containers/0/image",
-        "value": $image
-      }]')
-      kubectl -n syn-cluster-api patch deployment/capcs-controller-manager \
-        --type=json --patch "$image_patch"
-
-      echo "Waiting for cloudscale CAPI provider rollout..."
-      kubectl wait --for=condition=Available -n syn-cluster-api deployment/capcs-controller-manager
-      echo "✅ cloudscale CAPI provider updated."
-    fi
 
 - match: And I configure the Talos cluster via Project Syn
   description: |-
@@ -503,73 +445,24 @@ spells:
 
 - match: Then I bootstrap the cluster API providers on the Talos cluster
   description: |-
-    Get a kubeconfig for the Talos cluster and move the Cluster API configuration of the cluster to itself.
+    Install the cluster API providers on the Talos cluster.
+
+    The step uses the cert-manager and CAPI manifests rendered by Commodore.
   inputs:
     - name: commodore_cluster_id
     - name: cloudscale_token
-    - name: cacppt_image
-    - name: capcs_image
     - name: talos_kubeconfig
+    - name: vault_address
+    - name: vault_login_method
   run: |
     set -euo pipefail
 
     export KUBECONFIG="${INPUT_talos_kubeconfig}"
 
-    echo "Installing Project Syn cert-manager instance..."
-    kubectl apply -f catalog/manifests/cert-manager/00_namespace.yaml
-    kapitan refs --reveal --refs-path catalog/refs \
-      -f catalog/manifests/cert-manager/10_cert_manager | \
-      yq 'select(.apiVersion != "monitoring.coreos.com/v1")' | \
-      kubectl apply -f -
-    kubectl wait -n syn-cert-manager --for=condition=available \
-      deploy/cert-manager deploy/cert-manager-webhook
-    echo "✅ Project Syn cert-manager is ready."
+    export VAULT_ADDR=${INPUT_vault_address}
+    vault login -method=${INPUT_vault_login_method}
 
-    echo -e "\n\nInstalling Cluster API providers..."
-    export CLOUDSCALE_API_TOKEN="${INPUT_cloudscale_token}"
-    # TODO(sg): replace with CAPI init on Talos from Syn manifests
-    clusterctl init \
-      -n syn-cluster-api \
-      --bootstrap talos \
-      --control-plane talos \
-      --infrastructure cloudscale-ch-cloudscale
-    echo "✅ Cluster API initialized."
-
-    if [ "${INPUT_cacppt_image}" != "none" ]; then
-      echo "Upgrading Talos control plane CAPI provider to CAPI 1.13 feature branch..."
-      image_patch=$(jq -n -r --arg image "$INPUT_cacppt_image" '[{
-        "op": "replace",
-        "path": "/spec/template/spec/containers/0/image",
-        "value": $image
-      }]')
-      kubectl apply --server-side --force-conflicts \
-        -f "${GANDALF_SPELLBOOK_DIR}/manifests/cacppt-crds.yaml"
-      kubectl apply --server-side --force-conflicts \
-        -f "${GANDALF_SPELLBOOK_DIR}/manifests/cacppt-clusterrole.yaml"
-      kubectl apply --server-side --force-conflicts \
-        -f "${GANDALF_SPELLBOOK_DIR}/manifests/cacppt-webhooks.yaml"
-      kubectl -n syn-cluster-api patch deployment/cacppt-controller-manager \
-        --type=json --patch "$image_patch"
-
-      echo "Waiting for Talos control plane CAPI provider rollout..."
-      kubectl wait --for=condition=Available -n syn-cluster-api deployment/cacppt-controller-manager
-      echo "✅ Talos control plane CAPI provider updated."
-    fi
-
-    if [ "${INPUT_capcs_image}" != "none" ]; then
-      echo "Patching image for cloudscale CAPI provider..."
-      image_patch=$(jq -n -r --arg image "${INPUT_capcs_image}" '[{
-        "op": "replace",
-        "path": "/spec/template/spec/containers/0/image",
-        "value": $image
-      }]')
-      kubectl -n syn-cluster-api patch deployment/capcs-controller-manager \
-        --type=json --patch "$image_patch"
-
-      echo "Waiting for cloudscale CAPI provider rollout..."
-      kubectl wait --for=condition=Available -n syn-cluster-api deployment/capcs-controller-manager
-      echo "✅ cloudscale CAPI provider updated."
-    fi
+    "${GANDALF_SPELLBOOK_DIR}/scripts/install-capi.sh"
 
 - match: And I move the cluster API cluster to the Talos cluster
   description: |-
@@ -583,7 +476,7 @@ spells:
   run: |
     set -euo pipefail
     echo "Move cluster API cluster manifests to the Talos cluster..."
-    clusterctl move -n syn-cluster-api --kubeconfig "${INPUT_seed_kubeconfig}" --to-kubeconfig "${INPUT_talos_kubeconfig}"
+    clusterctl move -v 1 -n syn-cluster-api --kubeconfig "${INPUT_seed_kubeconfig}" --to-kubeconfig "${INPUT_talos_kubeconfig}"
 
     echo "Wait for cluster API cluster to become available on the Talos cluster..."
     export KUBECONFIG="${INPUT_talos_kubeconfig}"
