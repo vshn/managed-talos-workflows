@@ -352,7 +352,12 @@ spells:
     if [ -f bootstrap.yaml ]; then rm bootstrap.yaml; fi
     kapitan refs --reveal --refs-path catalog/refs -f catalog/manifests/cloudscale-cloud-controller-manager >> bootstrap.yaml
     kapitan refs --reveal --refs-path catalog/refs -f catalog/manifests/cilium/01_cilium_helmchart | \
-      yq -P 'select(.kind != "ServiceMonitor")' >> bootstrap.yaml
+      yq -P \
+        'select(.apiVersion != "monitoring.coreos.com/v1" and .apiVersion != "cert-manager.io/v1")
+        | select(.metadata.name != "hubble-relay")
+        | select(.kind=="ConfigMap" and .metadata.name == "cilium-config").data["hubble-disable-tls"]="true"
+        | select(.kind=="DaemonSet" and .metadata.name == "cilium").spec.template.metadata.annotations["cilium.io/cilium-configmap-checksum"]="bootstrap"' \
+      >> bootstrap.yaml
 
     echo "Applying bootstrap manifests 'ConfigMap'..."
     export cm_name="${INPUT_commodore_cluster_id}-bootstrap"
