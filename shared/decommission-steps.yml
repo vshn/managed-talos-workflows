@@ -118,7 +118,7 @@ spells:
   run: |
     set -euo pipefail
     echo "Move cluster API cluster manifests from the Talos cluster..."
-    clusterctl move -n syn-cluster-api --kubeconfig "${INPUT_talos_kubeconfig}" --to-kubeconfig "${INPUT_seed_kubeconfig}"
+    clusterctl move -v 1 -n syn-cluster-api --kubeconfig "${INPUT_talos_kubeconfig}" --to-kubeconfig "${INPUT_seed_kubeconfig}"
     echo "✅ Cluster API cluster manifests moved."
 
     echo "Wait cluster API cluster to become available on the Kind cluster..."
