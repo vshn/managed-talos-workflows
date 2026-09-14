@@ -348,21 +348,29 @@ spells:
     export VAULT_ADDR=${INPUT_vault_address}
     vault login -method=${INPUT_vault_login_method}
 
-    echo "Applying cluster manifests in seed cluster..."
-    kapitan refs --reveal --refs-path catalog/refs -f catalog/manifests/cloudscale-cloud-controller-manager > ccm.yaml
-    kubectl -n syn-cluster-api create configmap "${INPUT_commodore_cluster_id}-ccm" --from-file=ccm.yaml --dry-run=client -oyaml | \
-      kubectl apply --server-side -f -
-    rm ccm.yaml
-    # Omit LB services from cilium ClusterResourceSet -- otherwise we run into
-    # an issue where the CCM creates two cloudscale LBs for the same service.
-    # NOTE(sg): Revert to just omitting ServiceMonitor once cloudscale CCM
-    # 1.3.1 is released.
+    echo "Generating bootstrap manifests 'ConfigMap'..."
+    if [ -f bootstrap.yaml ]; then rm bootstrap.yaml; fi
+    kapitan refs --reveal --refs-path catalog/refs -f catalog/manifests/cloudscale-cloud-controller-manager >> bootstrap.yaml
     kapitan refs --reveal --refs-path catalog/refs -f catalog/manifests/cilium/01_cilium_helmchart | \
-      #yq -P 'select(.kind != "ServiceMonitor")' > cilium.yaml
-      yq -P 'select(.kind != "ServiceMonitor")|select((.kind == "Service" and .spec.type == "LoadBalancer")|not)' > cilium.yaml
-    kubectl -n syn-cluster-api create configmap "${INPUT_commodore_cluster_id}-cilium" --from-file=cilium.yaml --dry-run=client -oyaml | \
+      yq -P 'select(.kind != "ServiceMonitor")' >> bootstrap.yaml
+
+    echo "Applying bootstrap manifests 'ConfigMap'..."
+    export cm_name="${INPUT_commodore_cluster_id}-bootstrap"
+    kubectl -n syn-cluster-api create configmap \
+      "${cm_name}" --from-file=bootstrap.yaml --dry-run=client -oyaml | \
       kubectl apply --server-side -f -
-    rm cilium.yaml
+    rm bootstrap.yaml
+
+    echo "Applying 'ClusterResourceSet' for Talos cluster..."
+    yq '.spec.resources=[
+      {
+        "kind": "ConfigMap",
+        "name": strenv(cm_name)
+      }
+    ]' "${GANDALF_SPELLBOOK_DIR}/manifests/cluster-bootstrap.yaml" | \
+      kubectl apply -n syn-cluster-api --server-side -f-
+
+    echo "Applying cluster manifests in seed cluster..."
     kapitan refs --reveal --refs-path catalog/refs -f catalog/manifests/talos-capi-cluster-cloudscale/capi_cluster.yaml | \
       kubectl -n syn-cluster-api apply --server-side -f -
     kapitan refs --reveal --refs-path catalog/refs -f catalog/manifests/talos-capi-cluster-cloudscale/worker_group_*.yaml | \
@@ -458,6 +466,11 @@ spells:
   - name: commodore_cluster_id
   run: |
     set -euo pipefail
+    echo "Deleting bootstrap 'ClusterResourceSet' and 'ConfigMap'..."
+    kubectl --kubeconfig "${INPUT_seed_kubeconfig}" -n syn-cluster-api \
+      delete clusterresourceset cloudscale-bootstrap
+    echo "✅ Bootstrap resources deleted."
+
     echo "Move cluster API cluster manifests to the Talos cluster..."
     clusterctl move -v 1 -n syn-cluster-api --kubeconfig "${INPUT_seed_kubeconfig}" --to-kubeconfig "${INPUT_talos_kubeconfig}"
 
