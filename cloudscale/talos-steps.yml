@@ -38,6 +38,7 @@ spells:
     - name: talos_version
       description: Talos version to use, without the `v` prefix, e.g. "1.13.4"
     - name: talos_schematic_uuid
+    - name: bucket_user
   outputs:
     - name: custom_image_slug
   run: |
@@ -74,6 +75,11 @@ spells:
     fi
 
     echo "Uploading Talos image to cloudscale S3..."
+    mc alias set \
+      "${INPUT_commodore_cluster_id}" "https://objects.${INPUT_csp_region}.cloudscale.ch" \
+      "$(echo "$INPUT_bucket_user" | jq -r '.keys[0].access_key')" \
+      "$(echo "$INPUT_bucket_user" | jq -r '.keys[0].secret_key')"
+
     mc cp "$image" "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap/"
     mc anonymous set download "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap/${image}"
     echo "✅ Talos image upload complete."
