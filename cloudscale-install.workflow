@@ -25,3 +25,4 @@ And I move the cluster API cluster to the Talos cluster
 And delete the Kind cluster
 Then I synthesize the cluster
 And I wait until all ArgoCD apps are synced and healthy
+Then I delete the jumphost
