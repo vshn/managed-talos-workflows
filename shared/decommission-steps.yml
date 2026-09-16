@@ -54,20 +54,20 @@ spells:
     export KUBECONFIG="${INPUT_commodore_cluster_id}.kubeconfig"
     if ! kubectl get nodes; then echo "❌ Unable to access cluster with downloaded kubeconfig, check manually."; else echo "✅ Cluster access works with downloaded kubeconfig."; fi
 
-- match: And I compile the cluster catalog
+- match: And I extract the cluster's base domain from the cluster inventory
   description: |-
-    This step compiles the catalog to ensure you have a local checkout of the cluster repository
-    during decommissioning.
+    Extract the cluster's base domain from the cluster inventory.
   inputs:
-  - name: commodore_api_url
-  - name: commodore_cluster_id
   - name: commodore_tenant_id
   outputs:
   - name: base_domain
   run: |
     set -euo pipefail
-    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
-    commodore catalog compile ${INPUT_commodore_cluster_id}
+
+    if [ ! -d "inventory/classes/${INPUT_commodore_tenant_id}" ]; then
+      echo "❌ Expected current working directory to be a Commodore working directory for the target cluster."
+      exit 1
+    fi
 
     base_domain=$(kapitan inventory --inventory-backend=reclass-rs -t cluster |\
       yq '.parameters.talos.baseDomain')
