@@ -1,0 +1,248 @@
+spells:
+- match: Given I have all the tools required to upload a Talos image to cloudscale
+  run: |
+
+    if which yq >/dev/null 2>&1 ; then { echo "✅ yq is installed."; } ; else { echo "❌ yq is not installed. Please install yq to proceed."; exit 1; } ; fi
+    if yq --version | grep -E 'version v[4-9]\.' | grep 'mikefarah' >/dev/null 2>&1 ; then { echo "✅ yq by mikefarah version 4 or higher is installed."; } ; else { echo "❌ yq version 4 or higher is required. Please upgrade yq to proceed."; exit 1; } ; fi
+
+    if which jq >/dev/null 2>&1 ; then { echo "✅ jq is installed."; } ; else { echo "❌ jq is not installed. Please install jq to proceed."; exit 1; } ; fi
+
+    if which vault >/dev/null 2>&1 ; then { echo "✅ vault (HashiCorp Vault) is installed."; } ; else { echo "❌ vault (HashiCorp Vault) is not installed. Please install vault to proceed."; exit 1; } ; fi
+
+    if which curl >/dev/null 2>&1 ; then { echo "✅ curl is installed."; } ; else { echo "❌ curl is not installed. Please install curl to proceed."; exit 1; } ; fi
+
+    if which xz >/dev/null 2>&1 ; then { echo "✅ xz is installed."; } ; else { echo "❌ xz is not installed. Please install xz to proceed."; exit 1; } ; fi
+
+    if which commodore >/dev/null 2>&1 ; then { echo "✅ commodore (Project Syn) is installed."; } ; else { echo "❌ commodore (Project Syn) is not installed. Please install it with 'uv tool install syn-commodore && commodore tool install --missing' ."; exit 1; } ; fi
+
+
+    echo "✅ All prerequisites are met."
+
+- match: And I select a target Talos and Kubernetes version
+  description: |-
+    This step asks the user for the desired Talos and Kubernetes target
+    versions, queries the cluster for the current version, and the Talos
+    website for supported versions.
+  inputs:
+    - name: target_talos_version
+      description: |-
+        When set to a value other than `none`, the cluster is upgraded to this
+        Talos version. The Talos version must be provided without a 'v'
+        prefix, for example '1.13.9'.
+    - name: target_kubernetes_version
+      description: |-
+        When set to a value other than `none`, the cluster is also upgraded to
+        this Kubernetes version. The Kubernetes version must be provided
+        without a 'v' prefix, for example '1.36.4'.
+    - name: talos_kubeconfig
+  outputs:
+    - name: talos_version
+      description: |-
+        The final Talos version for the cluster.
+    - name: kubernetes_version
+      description: |-
+        The final Kubernetes version for the cluster.
+  run: |
+    set -euo pipefail
+
+    echo "Fetching kubeconfig from cluster..."
+
+    echo "Querying cluster for current Talos and Kubernetes version..."
+    export KUBECONFIG="${INPUT_talos_kubeconfig}"
+    if [ ! -f "$KUBECONFIG" ]; then
+      echo "Provided kubeconfig doesn't exist"
+      sleep 0.2
+      exit 1
+    fi
+    current_k8s_version=$(kubectl version -ojson 2>/dev/null | jq -r '.serverVersion.gitVersion[1:]')
+    current_talos_version=$(kubectl get talosupgrade cluster -ojson | jq -r '.spec.talos.version[1:]')
+    echo "Cluster currently has Kubernetes ${current_k8s_version} and Talos ${current_talos_version}"
+
+    target_k8s_version="${INPUT_target_kubernetes_version}"
+    if [ "$target_k8s_version" = "none" ]; then
+      target_k8s_version="${current_k8s_version}"
+    fi
+    target_talos_version="${INPUT_target_talos_version}"
+    if [ "$target_talos_version" = "none" ]; then
+      target_talos_version="${current_talos_version}"
+    fi
+
+    if [ "${current_k8s_version}" != "${target_k8s_version}" ]; then
+      echo -e "\nValidating upgrade from Kubernetes ${current_k8s_version} to Kubernetes ${target_k8s_version}..."
+      python3 "${GANDALF_SPELLBOOK_DIR}/scripts/check-version-skew.py" "${current_k8s_version}" "${target_k8s_version}"
+      env -i "kubernetes_version=${target_k8s_version}" >> "$OUTPUT"
+    else
+      env -i "kubernetes_version=none" >> "$OUTPUT"
+    fi
+    target_k8s_minor="${target_k8s_version%.*}"
+
+    echo ""
+    if [ "${current_talos_version}" != "${target_talos_version}" ]; then
+      echo -e "\nValidating upgrade from Talos ${current_talos_version} to Talos ${target_talos_version}..."
+      python3 "${GANDALF_SPELLBOOK_DIR}/scripts/check-version-skew.py" "${current_talos_version}" "${target_talos_version}"
+      env -i "talos_version=${target_talos_version}" >> "$OUTPUT"
+    else
+      env -i "talos_version=none" >> "$OUTPUT"
+    fi
+    target_talos_minor="${target_talos_version%.*}"
+
+    echo -e "\nFetching Talos v${target_talos_minor} support matrix..."
+    curl -fsSLo support.md "https://docs.siderolabs.com/talos/v${target_talos_minor}/getting-started/support-matrix.md"
+
+    echo "Validating target Talos and Kubernetes compatibility"
+    python3 "${GANDALF_SPELLBOOK_DIR}/scripts/check-talos-k8s-version.py" support.md "${target_k8s_minor}" "${target_talos_minor}"
+
+    rm support.md
+
+
+- match: And I select the target cluster
+  description: |-
+    Select target cluster and fetch cluster metadata from Lieutenant and required tokens from Vault.
+  inputs:
+    - name: commodore_api_url
+      description: |-
+        URL of the Commodore API to use for retrieving cluster information.
+
+        Use https://api.syn.vshn.net as the Commodore API URL for production clusters.
+        Use https://api-int.syn.vshn.net for test clusters.
+    - name: commodore_cluster_id
+      description: |-
+        The Project Syn cluster ID of the cluster to update
+  outputs:
+    - name: cloudscale_token
+      type: sensitive
+    - name: csp_region
+    - name: tenant_repo_url
+    - name: commodore_tenant_id
+    - name: talos_kubeconfig
+    - name: bucket_user
+      type: sensitive
+  run: |
+    set -euo pipefail
+
+    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
+
+    cluster_resp=$(curl -sH"Authorization: Bearer $(commodore fetch-token)" \
+      "${COMMODORE_API_URL}/clusters/${INPUT_commodore_cluster_id}")
+    tenant_id=$(jq -n -r  --argjson cluster "$cluster_resp" '$cluster.tenant')
+    env -i "commodore_tenant_id=$tenant_id" >> "$OUTPUT"
+    tenant_repo=$(curl -sH"Authorization: Bearer $(commodore fetch-token)" \
+      "${COMMODORE_API_URL}/tenants/${tenant_id}" |\
+      jq -r '.gitRepo.url')
+    env -i "tenant_repo_url=$tenant_repo" >> "$OUTPUT"
+
+    csp_region=$(jq -n -r --argjson cluster "$cluster_resp" '$cluster.facts.region')
+    env -i "csp_region=$csp_region" >> "$OUTPUT"
+
+    vault_config=$(curl -s "${COMMODORE_API_URL}" | jq '.vault')
+    VAULT_ADDR="$(jq -n -r --argjson v "$vault_config" '$v.addr')"
+    export VAULT_ADDR
+    vault login -method="$(jq -n -r --argjson v "$vault_config" '$v.loginMethod')"
+
+    cloudscale_secret=$(vault kv get -format=json \
+      "clusters/kv/${tenant_id}/${INPUT_commodore_cluster_id}/cloudscale")
+    cloudscale_token=$(jq -r -n --argjson s "$cloudscale_secret" '$s.data.data.token')
+    env -i "cloudscale_token=$cloudscale_token" >> "$OUTPUT"
+
+    echo "Configuring bucket user."
+    set -x
+    bucket_user=$(jq -c -n -r --argjson s "$cloudscale_secret" '{
+      keys: [{
+        access_key: $s.data.data.s3_access_key,
+        secret_key: $s.data.data.s3_secret_key
+      }]
+    }')
+    env -i "bucket_user=$bucket_user" >> "$OUTPUT"
+    set +x
+
+    echo "Extracting apps domain for cluster '${INPUT_commodore_cluster_id}'."
+    apps_domain=$(jq -n -r --argjson cluster "$cluster_resp" '$cluster.dynamicFacts.talosAppsDomain')
+
+    echo "Fetching kubeconfig for cluster '${INPUT_commodore_cluster_id}' from 'https://kubeconfig.${apps_domain}'."
+    curl -fsSLo "${INPUT_commodore_cluster_id}.kubeconfig" \
+      "https://kubeconfig.${apps_domain}/kubeconfig"
+    env -i "talos_kubeconfig=./${INPUT_commodore_cluster_id}.kubeconfig" >> "$OUTPUT"
+    echo "✅ Got kubeconfig for '${INPUT_commodore_cluster_id}'."
+    export KUBECONFIG="${INPUT_commodore_cluster_id}.kubeconfig"
+    if ! kubectl get nodes; then echo "❌ Unable to access cluster with downloaded kubeconfig, check manually."; else echo "✅ Cluster access works with downloaded kubeconfig."; fi
+
+- match: And I extract the Talos schematic UUID from the cluster config
+  description: |-
+    Read the Talos schematic UUID from the cluster's inventory.
+  inputs:
+    - name: commodore_tenant_id
+  outputs:
+    - name: talos_schematic_uuid
+  run: |
+    set -euo pipefail
+
+    if [ ! -d "inventory/classes/${INPUT_commodore_tenant_id}" ]; then
+      echo "❌ Expected current working directory to be a Commodore working directory for the target cluster."
+      exit 1
+    fi
+
+    echo "Extracting Talos schematic UUID from cluster inventory..."
+    schematic_uuid=$(kapitan inventory --inventory-backend=reclass-rs -t cluster | \
+      yq -r '.parameters.talos_capi_cluster_cloudscale.talosSchematicUUID')
+    if test -z "$schematic_uuid" || test "$schematic_uuid" == "null"; then echo "❌ Failed to extract Talos schematic UUID from cluster inventory."; exit 1; else echo "✅ Extracted schematic UUID '${schematic_uuid}' from cluster inventory."; fi
+    env -i "talos_schematic_uuid=${schematic_uuid}" >> "$OUTPUT"
+
+- match: Then I update the cluster to use the new Talos version and image
+  description: |-
+    Update the target cluster Project Syn config to use the new image.
+  inputs:
+    - name: commodore_cluster_id
+    - name: commodore_tenant_id
+    - name: talos_version
+      description: |-
+        When set to a value other than `none`, the cluster is  upgraded to
+        this Talos version. The Talos version must be provided without a 'v'
+        prefix, for example '1.13.9'.
+    - name: kubernetes_version
+      description: |-
+        When set to a value other than `none`, the cluster is upgraded to this
+        Kubernetes version. The Kubernetes version must be provided without a
+        'v' prefix, for example '1.36.4'.
+    - name: custom_image_slug
+  run: |
+    set -euo pipefail
+
+    pushd "inventory/classes/${INPUT_commodore_tenant_id}"
+    commit_msg="Update cluster ${INPUT_commodore_cluster_id} to"
+    if [ "${INPUT_talos_version}" != "none" ]; then
+      echo "Updating Talos version to ${INPUT_talos_version}..."
+      yq -i '.parameters.talos_capi_cluster_cloudscale.cloudscale.customImageSlug=strenv(INPUT_custom_image_slug)' \
+        "${INPUT_commodore_cluster_id}.yml"
+      yq -i '.parameters.talos_capi_cluster_cloudscale.talosVersion=strenv(INPUT_talos_version)' \
+        "${INPUT_commodore_cluster_id}.yml"
+      commit_msg="${commit_msg} Talos version v${INPUT_talos_version}"
+    fi
+
+    if [[ "${INPUT_kubernetes_version}" != "none" ]]; then
+      echo "Updating Kubernetes version to ${INPUT_kubernetes_version}..."
+      yq -i '.parameters.talos_capi_cluster_cloudscale.kubernetesVersion="v"+strenv(INPUT_kubernetes_version)' \
+        "${INPUT_commodore_cluster_id}.yml"
+      if [[ "$commit_msg" == *"Talos version"* ]]; then
+        commit_msg="${commit_msg} and"
+      fi
+      commit_msg="${commit_msg} Kubernetes version v${INPUT_kubernetes_version}"
+    fi
+
+    if ! git commit -a -m "$commit_msg"; then
+      echo "No changes, skipping 'git push'..."
+    else
+      git push
+    fi
+    popd
+
+- match: And I trigger a refresh of the talos-capi-cluster-cloudscale ArgoCD app
+  description: |-
+    Trigger an ArgoCD refresh to apply the upgrade
+  inputs:
+    - name: talos_kubeconfig
+  run: |
+    set -euo pipefail
+
+    export KUBECONFIG="${INPUT_talos_kubeconfig}"
+
+    kubectl -n syn annotate applications.argoproj.io talos-capi-cluster-cloudscale argocd.argoproj.io/refresh=normal

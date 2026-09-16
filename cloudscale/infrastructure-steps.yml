@@ -448,6 +448,24 @@ spells:
     done
     echo "✅ Deleted non-backup S3 buckets."
 
+- match: And I create a bootstrap bucket
+  inputs:
+    - name: commodore_cluster_id
+    - name: bucket_user
+    - name: csp_region
+  run: |
+    set -euo pipefail
+
+    echo "Creating bootstrap S3 bucket..."
+    mc alias set \
+      "${INPUT_commodore_cluster_id}" "https://objects.${INPUT_csp_region}.cloudscale.ch" \
+      "$(echo "$INPUT_bucket_user" | jq -r '.keys[0].access_key')" \
+      "$(echo "$INPUT_bucket_user" | jq -r '.keys[0].secret_key')"
+
+    mc mb --ignore-existing \
+      "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap/"
+    echo "✅ Created bootstrap S3 bucket."
+
 - match: And I delete the bootstrap bucket
   inputs:
     - name: commodore_cluster_id
