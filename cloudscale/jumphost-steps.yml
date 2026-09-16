@@ -1,5 +1,5 @@
 spells:
-- match: And I set up an SSH jumphost in the cluster network
+- match: (And|Then) I set up an SSH jumphost in the cluster network
   description: |-
     Set up a jumphost which we can use to reach each nodes' Talos API in the
     bootstrap Talos provider
@@ -201,3 +201,32 @@ spells:
       curl -fsSL -H"$auth_header" -XDELETE "${server/|*}"
     done
     echo "✅ Jumphost(s) for '${INPUT_commodore_cluster_id}' deleted."
+
+- match: And I show the user how to connect to the jumphost
+  description: |-
+    Show how to connect to the jumphost
+  inputs:
+    - name: commodore_cluster_id
+    - name: base_domain
+    - name: ssh_private_key_path
+    - name: jumphost_public_ip
+    - name: jumphost_ed25519_hostkey
+  run: |
+    set -euo pipefail
+
+    hostkey_fingerprint=$(echo "${INPUT_jumphost_public_ip} ${INPUT_jumphost_ed25519_hostkey}" | \
+      ssh-keygen -l -f- | cut -d' ' -f2)
+
+    echo "✅ Jumphost ready. To connect use the following:"
+    echo ""
+    echo "SSH key: ${INPUT_ssh_private_key_path}. Load into your agent with"
+    echo ""
+    echo "    ssh-add ${INPUT_ssh_private_key_path}"
+    echo ""
+    echo "Then you can access the jumphost with"
+    echo ""
+    echo "    ssh ubuntu@${INPUT_jumphost_public_ip}"
+    echo ""
+    echo "The jumphost's ED25519 host key fingerprint is (paste this into the hostkey prompt shown by ssh)"
+    echo ""
+    echo "    ${hostkey_fingerprint}"
