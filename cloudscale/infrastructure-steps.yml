@@ -333,7 +333,7 @@ spells:
     echo "ingress     IN A     ${INPUT_talos_ingress_vip/\/*}"
     echo "egress      IN A     ${INPUT_cloudscale_router_public_ip}"
     echo ""
-    echo "*.apps    IN CNAME ingress.c-alde-talos-poc1.appuio-beta.ch."
+    echo "*.apps    IN CNAME ingress.${INPUT_commodore_cluster_id}.${INPUT_base_domain}."
 
     echo -e "\n\nDon't continue with subsequent steps until you've configured the DNS records."
     sleep 5
