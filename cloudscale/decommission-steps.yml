@@ -146,11 +146,10 @@ spells:
     if [[ "$OBJECT_ID" != "null" ]]
     then
       restic restore "$OBJECT_ID" --target backup-dump-${INPUT_commodore_cluster_id}
+      echo "✅ Extracted latest objects backup to directory 'backup-dump-${INPUT_commodore_cluster_id}'."
     fi
 
-    # retrieve latest etcd snapshot
-    echo "==== TODO retrieve etcd snapshot TODO ===="
-
+    echo "Configuring access to the backup S3 bucket via minio client..."
     # proceed with deleting the backup bucket
     # Use already exiting bucket user
     response=$(curl -sH "Authorization: Bearer ${INPUT_cloudscale_token}" \
@@ -162,8 +161,26 @@ spells:
       "${INPUT_commodore_cluster_id}_backup" "${S3_ENDPOINT##s3:}" \
       "$(echo "$response" | jq -r '.keys[0].access_key')" \
       "$(echo "$response" | jq -r '.keys[0].secret_key')"
+    echo "✅ minio client configured."
 
-    # Delete bucket
+    # retrieve latest etcd snapshot
+    # Snapshot file names start with cluster ID and are sorted by age
+    # (ascending) since they contain a RFC3339 timestamp indicating the time
+    # at which they were created.
+    echo "Extracting latest etcd snapshot from etcd backup bucket..."
+    etcd_snapshot_s3_dir="${INPUT_commodore_cluster_id}_backup/${INPUT_commodore_cluster_id}-etcd-backup/${INPUT_commodore_cluster_id}"
+    latest_etcd_snapshot=$(mc ls "${etcd_snapshot_s3_dir}" | tail -n1 | grep -Eo "${INPUT_commodore_cluster_id}.*")
+    mc cp "${etcd_snapshot_s3_dir}/${latest_etcd_snapshot}" "backup-dump-${INPUT_commodore_cluster_id}"
+    echo "✅ Saved latest etcd snapshot to 'backup-dump-${INPUT_commodore_cluster_id}/${latest_etcd_snapshot}'."
+    # Grab `age` key from Vault
+    etcd_age_pubkey=$(yq '.spec.jobTemplate.spec.template.spec.containers[0].env[]|select(.name=="AGE_RECIPIENT_PUBLIC_KEY").value' \
+      catalog/manifests/talos-backup/20_cronjob.yaml |\
+      cut -d: -f2)
+    etcd_age_secret=${etcd_age_pubkey%/*}
+    vault kv get -format json "clusters/kv/${etcd_age_secret}" > "backup-dump-${INPUT_commodore_cluster_id}/etcd-age-keys.json"
+    echo "✅ Saved age keys for etcd snapshot to 'backup-dump-${INPUT_commodore_cluster_id}/etcd-age-keys.json'."
+
+    # Delete object backups bucket
     mc rb "${INPUT_commodore_cluster_id}_backup/${INPUT_commodore_cluster_id}-cluster-backup" --force
 
     # Delete etcd snapshots bucket
