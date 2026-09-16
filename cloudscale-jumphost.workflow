@@ -1,3 +1,4 @@
+Given I have all prerequisites installed
 And I select the cluster to access
 And I compile the cluster catalog
 And I extract the cluster's base domain from the cluster inventory
