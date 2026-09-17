@@ -447,3 +447,20 @@ spells:
       fi
     done
     echo "✅ Deleted non-backup S3 buckets."
+
+- match: And I delete the bootstrap bucket
+  inputs:
+    - name: commodore_cluster_id
+    - name: bucket_user
+    - name: csp_region
+  run: |
+    set -euo pipefail
+
+    echo "Deleting bootstrap S3 bucket..."
+    mc alias set \
+      "${INPUT_commodore_cluster_id}" "https://objects.${INPUT_csp_region}.cloudscale.ch" \
+      "$(echo "$INPUT_bucket_user" | jq -r '.keys[0].access_key')" \
+      "$(echo "$INPUT_bucket_user" | jq -r '.keys[0].secret_key')"
+
+    mc rb "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap/" --force
+    echo "✅ Deleted bootstrap S3 bucket."

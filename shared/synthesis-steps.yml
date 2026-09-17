@@ -37,6 +37,7 @@ spells:
     kubectl wait --for=create crds/argocds.argoproj.io --timeout=5m
     echo "✅ ArgoCD custom resource created."
     echo "# Waiting for ArgoCD resource to become ready ..."
+    sleep 1
     kubectl wait --for=condition=NamesAccepted=True crd argocds.argoproj.io --timeout=60s
     kubectl wait --for=condition=Established=True crd argocds.argoproj.io --timeout=60s
     echo "✅ ArgoCD custom resource ready."

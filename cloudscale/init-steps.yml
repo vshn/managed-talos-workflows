@@ -128,13 +128,12 @@ spells:
       echo "Cloudscale S3 user for cluster ID '${INPUT_commodore_cluster_id}' already exists. id: $(echo "$response" | jq -r .id)"
     fi
 
-    echo -n "Waiting for S3 credentials to become available ..."
+    echo "Waiting for S3 credentials to become available ..."
     until mc alias set \
       "${INPUT_commodore_cluster_id}" "https://objects.${INPUT_csp_region}.cloudscale.ch" \
       "$(jq -n -r --argjson resp "$response" '$resp.keys[0].access_key')" \
       "$(jq -n -r --argjson resp "$response" '$resp.keys[0].secret_key')"
     do
-      echo -n .
       sleep 5
     done
     echo "OK"
@@ -148,10 +147,15 @@ spells:
       exit 1
     fi
 
-    mc alias set \
+    echo "Configuring backup region in minio client ..."
+    until mc alias set \
       "${INPUT_commodore_cluster_id}_backup" "https://objects.${backup_region}.cloudscale.ch" \
       "$(jq -n -r --argjson resp "$response" '$resp.keys[0].access_key')" \
       "$(jq -n -r --argjson resp "$response" '$resp.keys[0].secret_key')"
+    do
+      sleep 5
+    done
+    echo "OK"
 
     mc mb --ignore-existing \
       "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap"

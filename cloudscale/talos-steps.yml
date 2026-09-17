@@ -38,6 +38,7 @@ spells:
     - name: talos_version
       description: Talos version to use, without the `v` prefix, e.g. "1.13.4"
     - name: talos_schematic_uuid
+    - name: bucket_user
   outputs:
     - name: custom_image_slug
   run: |
@@ -50,18 +51,23 @@ spells:
     image_slug="talos-v${INPUT_talos_version}-${INPUT_talos_schematic_uuid:0:8}"
     env -i "custom_image_slug=$image_slug" >> "$OUTPUT"
 
-    target_zones="-Fzones=${INPUT_csp_region}1"
+    target_zones=$(jq -n -r --arg zone "${INPUT_csp_region}1" '[$zone]')
     # NOTE(sg): The value of zones is a space-separated list of zones where
     # the image with the given slug exists or the empty string if the image
     # doesn't exist in any zone.
-    zones=$(curl -fsSL -H "$auth_header" https://api.cloudscale.ch/v1/custom-images | \
-      jq --arg slug "$image_slug" -r '.[] | select(.slug == $slug) | [.zones[]|.slug]|join(" ")')
+    images_resp=$(curl -fsSL -H "$auth_header" https://api.cloudscale.ch/v1/custom-images)
+    zones=$(jq -n -r --argjson resp "$images_resp" --arg slug "$image_slug" \
+      '$resp[] | select(.slug == $slug) | [.zones[]|.slug]|join(" ")')
+    old_image_href=
     if [ -n "$zones" ] && [[ "$zones" == *"${INPUT_csp_region}1"* ]]; then
       echo "✅ Image '$image_slug' already exists in cloudscale zone ${INPUT_csp_region}, skipping upload."
       exit 0
     elif [ -n "$zones" ]; then
       echo "Image '$image_slug' already exists in cloudscale zone(s) '${zones}', configuring multi-zone image upload"
-      target_zones="${target_zones} -Fzones=${zones}"
+      old_image_href=$(jq -n -r --argjson resp "$images_resp" --arg slug "$image_slug" \
+        '$resp[] |select(.slug == $slug) | .href')
+      target_zones=$(jq -n -r --argjson zones "$target_zones" \
+        --arg zone "$INPUT_csp_region}1" '$zones + [$zone]')
     fi
 
     if [ ! -f "$image" ]; then
@@ -74,19 +80,34 @@ spells:
     fi
 
     echo "Uploading Talos image to cloudscale S3..."
+    mc alias set \
+      "${INPUT_commodore_cluster_id}" "https://objects.${INPUT_csp_region}.cloudscale.ch" \
+      "$(echo "$INPUT_bucket_user" | jq -r '.keys[0].access_key')" \
+      "$(echo "$INPUT_bucket_user" | jq -r '.keys[0].secret_key')"
+
     mc cp "$image" "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap/"
     mc anonymous set download "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap/${image}"
     echo "✅ Talos image upload complete."
 
     echo "Importing image into cloudscale..."
+    import_req=$(jq -n -r \
+      --argjson zones "$target_zones" \
+      --argjson image_download "$(mc share download --json "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap/${image}")" \
+      --arg name "Talos Linux v${INPUT_talos_version} (schematic ${INPUT_talos_schematic_uuid:0:8})" \
+      --arg image_slug "$image_slug" \
+      '{
+        "slug": $image_slug,
+        "url": $image_download.url,
+        "name": $name,
+        "zones": $zones,
+        "source_format": "raw",
+        "user_data_handling": "pass-through"
+      }')
+
+
     import_resp=$(curl -fsSL -H "$auth_header" \
-      -F url="$(mc share download --json "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap/${image}" | jq -r .url)" \
-      -F name="Talos Linux v${INPUT_talos_version} (schematic ${INPUT_talos_schematic_uuid:0:8})" \
-      "${target_zones}" \
-      -F slug="$image_slug" \
-      -F source_format=raw \
-      -F user_data_handling=pass-through \
-      https://api.cloudscale.ch/v1/custom-images/import)
+      https://api.cloudscale.ch/v1/custom-images/import \
+      --json "$import_req")
     import_id=$(jq -n -r --argjson import "$import_resp" '$import.uuid')
 
     echo "✅ Talos image import is running (import UUID '${import_id}')."
@@ -133,6 +154,12 @@ spells:
       exit "$step_exit"
     else
       echo -e "\n✅ Successfully imported image"
+    fi
+
+    if [ "$old_image_href" != "" ]; then
+      echo -e "\nDeleting single-zone image for slug '${image_slug}'..."
+      curl -fsSL -H"$auth_header" -XDELETE "$old_image_href"
+      echo "✅ Deleted single-zone image for slug '${image_slug}'..."
     fi
     sleep 0.1
 
@@ -277,19 +304,17 @@ spells:
 
     pushd "inventory/classes/${INPUT_commodore_tenant_id}"
 
-    yq -i '.applications = (.applications + ["talos-capi-cluster-cloudscale"] | unique)' \
-      "${INPUT_commodore_cluster_id}.yml"
-
     api_vip=$(python3 -c \
       'import ipaddress,sys; print(ipaddress.ip_network(sys.argv[1])[0])' \
       "${INPUT_talos_api_vip}")
-    export api_vip
     ingress_vip=$(python3 -c \
       'import ipaddress,sys; print(ipaddress.ip_network(sys.argv[1])[0])' \
       "${INPUT_talos_ingress_vip}")
+
+    export api_vip
     export ingress_vip
+
     # generic talos configs
-    # TODO(sg): figure out which of them we actually need
     yq -i '.parameters.talos.apiVIP=strenv(api_vip)' \
       "${INPUT_commodore_cluster_id}.yml"
     yq -i '.parameters.talos.ingressVIP=strenv(ingress_vip)' \
@@ -297,33 +322,18 @@ spells:
     yq -i '.parameters.talos.baseDomain=strenv(INPUT_base_domain)' \
       "${INPUT_commodore_cluster_id}.yml"
 
-    export capi_k8s_version="v${INPUT_kubernetes_version}"
-
     # cloudscale configs
-    yq -i '.parameters.talos_capi_cluster_cloudscale.cloudscaleCluster.spec.floatingIP.address=strenv(api_vip)' \
-      "${INPUT_commodore_cluster_id}.yml"
     yq -i '.parameters.talos_capi_cluster_cloudscale.cloudscale.privateNetwork.uuid=strenv(INPUT_cloudscale_privnet_uuid)' \
       "${INPUT_commodore_cluster_id}.yml"
     yq -i '.parameters.talos_capi_cluster_cloudscale.cloudscale.customImageSlug=strenv(INPUT_custom_image_slug)' \
       "${INPUT_commodore_cluster_id}.yml"
 
-    # temp override cloudscale credentials for cluster
-    # TODO(sg): figure out canonical secret name
-    yq -i '.parameters.talos_capi_cluster_cloudscale.cloudscaleCluster.spec.credentialsRef.name="capcs-cloudscale"' \
-      "${INPUT_commodore_cluster_id}.yml"
-
     # talos version configs
-    talosMinor=$(jq -n -r --arg tver "${INPUT_talos_version}" \
-      '$tver | split(".")[0:2] | join(".")')
-    export talosMinor
-    yq -i '.parameters.talos_capi_cluster_cloudscale.talosVersion=strenv(talosMinor)' \
+    yq -i '.parameters.talos_capi_cluster_cloudscale.talosVersion=strenv(INPUT_talos_version)' \
       "${INPUT_commodore_cluster_id}.yml"
-      yq -i '.parameters.talos_capi_cluster_cloudscale.kubernetesVersion=strenv(capi_k8s_version)' \
+    yq -i '.parameters.talos_capi_cluster_cloudscale.kubernetesVersion="v"+strenv(INPUT_kubernetes_version)' \
       "${INPUT_commodore_cluster_id}.yml"
     yq -i '.parameters.talos_capi_cluster_cloudscale.talosSchematicUUID=strenv(INPUT_talos_schematic_uuid)' \
-      "${INPUT_commodore_cluster_id}.yml"
-    # NOTE(sg): this shouldn't hurt for clusters that don't yet use Tuppr
-    yq -i '.parameters.tuppr.talos_upgrades.cluster.spec.talos.version="v"+strenv(INPUT_talos_version)' \
       "${INPUT_commodore_cluster_id}.yml"
 
     git commit -am "Configure cluster ${INPUT_commodore_cluster_id}" || echo "No changes to commit"
@@ -365,21 +375,34 @@ spells:
     export VAULT_ADDR=${INPUT_vault_address}
     vault login -method=${INPUT_vault_login_method}
 
-    echo "Applying cluster manifests in seed cluster..."
-    kapitan refs --reveal --refs-path catalog/refs -f catalog/manifests/cloudscale-cloud-controller-manager > ccm.yaml
-    kubectl -n syn-cluster-api create configmap "${INPUT_commodore_cluster_id}-ccm" --from-file=ccm.yaml --dry-run=client -oyaml | \
-      kubectl apply --server-side -f -
-    rm ccm.yaml
-    # Omit LB services from cilium ClusterResourceSet -- otherwise we run into
-    # an issue where the CCM creates two cloudscale LBs for the same service.
-    # NOTE(sg): Revert to just omitting ServiceMonitor once cloudscale CCM
-    # 1.3.1 is released.
+    echo "Generating bootstrap manifests 'ConfigMap'..."
+    if [ -f bootstrap.yaml ]; then rm bootstrap.yaml; fi
+    kapitan refs --reveal --refs-path catalog/refs -f catalog/manifests/cloudscale-cloud-controller-manager >> bootstrap.yaml
     kapitan refs --reveal --refs-path catalog/refs -f catalog/manifests/cilium/01_cilium_helmchart | \
-      #yq -P 'select(.kind != "ServiceMonitor")' > cilium.yaml
-      yq -P 'select(.kind != "ServiceMonitor")|select((.kind == "Service" and .spec.type == "LoadBalancer")|not)' > cilium.yaml
-    kubectl -n syn-cluster-api create configmap "${INPUT_commodore_cluster_id}-cilium" --from-file=cilium.yaml --dry-run=client -oyaml | \
+      yq -P \
+        'select(.apiVersion != "monitoring.coreos.com/v1" and .apiVersion != "cert-manager.io/v1")
+        | select(.metadata.name != "hubble-relay")
+        | select(.kind=="ConfigMap" and .metadata.name == "cilium-config").data["hubble-disable-tls"]="true"
+        | select(.kind=="DaemonSet" and .metadata.name == "cilium").spec.template.metadata.annotations["cilium.io/cilium-configmap-checksum"]="bootstrap"' \
+      >> bootstrap.yaml
+
+    echo "Applying bootstrap manifests 'ConfigMap'..."
+    export cm_name="${INPUT_commodore_cluster_id}-bootstrap"
+    kubectl -n syn-cluster-api create configmap \
+      "${cm_name}" --from-file=bootstrap.yaml --dry-run=client -oyaml | \
       kubectl apply --server-side -f -
-    rm cilium.yaml
+    rm bootstrap.yaml
+
+    echo "Applying 'ClusterResourceSet' for Talos cluster..."
+    yq '.spec.resources=[
+      {
+        "kind": "ConfigMap",
+        "name": strenv(cm_name)
+      }
+    ]' "${GANDALF_SPELLBOOK_DIR}/manifests/cluster-bootstrap.yaml" | \
+      kubectl apply -n syn-cluster-api --server-side -f-
+
+    echo "Applying cluster manifests in seed cluster..."
     kapitan refs --reveal --refs-path catalog/refs -f catalog/manifests/talos-capi-cluster-cloudscale/capi_cluster.yaml | \
       kubectl -n syn-cluster-api apply --server-side -f -
     kapitan refs --reveal --refs-path catalog/refs -f catalog/manifests/talos-capi-cluster-cloudscale/worker_group_*.yaml | \
@@ -475,6 +498,11 @@ spells:
   - name: commodore_cluster_id
   run: |
     set -euo pipefail
+    echo "Deleting bootstrap 'ClusterResourceSet' and 'ConfigMap'..."
+    kubectl --kubeconfig "${INPUT_seed_kubeconfig}" -n syn-cluster-api \
+      delete clusterresourceset cloudscale-bootstrap
+    echo "✅ Bootstrap resources deleted."
+
     echo "Move cluster API cluster manifests to the Talos cluster..."
     clusterctl move -v 1 -n syn-cluster-api --kubeconfig "${INPUT_seed_kubeconfig}" --to-kubeconfig "${INPUT_talos_kubeconfig}"
 
