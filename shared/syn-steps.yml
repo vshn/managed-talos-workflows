@@ -1,0 +1,15 @@
+spells:
+- match: And I compile(?P<push> and push)? the cluster catalog
+  description: |-
+    This step compiles the catalog to ensure you have a local checkout of the cluster repository.
+  inputs:
+  - name: commodore_api_url
+  - name: commodore_cluster_id
+  run: |
+    set -euo pipefail
+    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
+    commodore_args=
+    if [ "${MATCH_push}" != "" ]; then
+      commodore_args="--push"
+    fi
+    commodore catalog compile "${INPUT_commodore_cluster_id}" ${commodore_args}
