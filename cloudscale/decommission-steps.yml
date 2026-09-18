@@ -187,7 +187,7 @@ spells:
     mc rb "${INPUT_commodore_cluster_id}_backup/${INPUT_commodore_cluster_id}-etcd-backup" --force
 
     # Delete object user
-    objuser=$(jq -n --argjson resp "$response" '$resp.href')
+    objuser=$(jq -r -n --argjson resp "$response" '$resp.href')
     echo "Deleting object user '$objuser' ..."
     curl -fsSL -H "Authorization: Bearer ${INPUT_cloudscale_token}" -X DELETE "$objuser"
     echo "✅ objects user deleted."
