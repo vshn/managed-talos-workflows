@@ -52,7 +52,7 @@ spells:
     env -i "talos_kubeconfig=./${INPUT_commodore_cluster_id}.kubeconfig" >> "$OUTPUT"
     echo "✅ Got kubeconfig for '${INPUT_commodore_cluster_id}'."
     export KUBECONFIG="${INPUT_commodore_cluster_id}.kubeconfig"
-    if ! kubectl get nodes; then echo "❌ Unable to access cluster with downloaded kubeconfig, check manually."; else echo "✅ Cluster access works with downloaded kubeconfig."; fi
+    if ! kubectl get nodes --request-timeout=2s; then echo "❌ Unable to access cluster with downloaded kubeconfig, check manually."; else echo "✅ Cluster access works with downloaded kubeconfig."; fi
 
 - match: And I compile(?P<push> and push)? the cluster catalog
   description: |-
