@@ -140,3 +140,16 @@ spells:
     echo
     echo You can go to https://control.vshn.net/vshn/services/${INPUT_commodore_cluster_id}/delete
     sleep 2
+
+- match: And I remove the cluster's DNS records
+  description: |-
+    This step deletes the cluster's DNS records
+  run: |
+    set -euo pipefail
+    echo '##############################################################################'
+    echo '#                                                                            #'
+    echo "#  Please manually delete the cluster's DNS records before proceeding.       #"
+    echo '#                                                                            #'
+    echo '##############################################################################'
+    echo
+    sleep 2
