@@ -1,4 +1,59 @@
 spells:
+- match: And I select the cluster to (?P<operation>decommission|access)
+  description: |-
+    Select the target cluster and extract some base parameters for the cluster
+    from the Lieutenant API and Vault.
+  inputs:
+    - name: commodore_api_url
+      description: |-
+        URL of the Commodore API on which the cluster is registered.
+
+        Usually https://api.syn.vshn.net for production clusters.
+        Usually https://api-int.syn.vshn.net for test clusters.
+    - name: commodore_cluster_id
+      description: |-
+        The Project Syn ID of the cluster to decommission.
+  outputs:
+    - name: talos_kubeconfig
+    - name: csp_region
+    - name: vault_address
+    - name: vault_login_method
+    - name: commodore_tenant_id
+  run: |
+    set -euo pipefail
+
+    export COMMODORE_API_URL="${INPUT_commodore_api_url}"
+
+    echo "Retrieving Vault address and login method..."
+    vault_addr=$(curl -s "${COMMODORE_API_URL}" | jq -r '.vault.addr')
+    if test -z "$vault_addr" || test "$vault_addr" == "null"; then echo "❌ Failed to retrieve Vault address from Lieutenant at '${COMMODORE_API_URL}'."; exit 1; else echo "✅ Retrieved Vault address '${vault_addr}' for Lieutenant at '${COMMODORE_API_URL}'."; fi
+    env -i "vault_address=${vault_addr}" >> "$OUTPUT"
+    vault_login_method=$(curl -s "${COMMODORE_API_URL}" | jq -r '.vault.loginMethod')
+    if test -z "$vault_login_method" || test "$vault_login_method" == "null"; then echo "❌ Failed to retrieve Vault login method from Lieutenant at '${COMMODORE_API_URL}'."; exit 1; else echo "✅ Retrieved Vault login method '${vault_login_method}' for Lieutenant at '${COMMODORE_API_URL}'."; fi
+    env -i "vault_login_method=${vault_login_method}" >> "$OUTPUT"
+
+    echo "Fetching cluster '${INPUT_commodore_cluster_id}' from Lieutenant..."
+    cluster_json=$(curl -fsSL -H"Authorization: Bearer $(commodore fetch-token)" \
+      "${INPUT_commodore_api_url}/clusters/${INPUT_commodore_cluster_id}")
+
+    echo "Extracting Project Syn tenant ID for '${INPUT_commodore_cluster_id}'..."
+    tenant=$(jq -n -r --argjson cluster "$cluster_json" '$cluster.tenant')
+    env -i "commodore_tenant_id=$tenant" >> "$OUTPUT"
+
+    region=$(jq -n -r --argjson cluster "$cluster_json" '$cluster.facts.region')
+    if test -z "$region" || test "$region" == "null" ; then { echo "❌ Failed to retrieve CSP region for cluster ID '$INPUT_commodore_cluster_id'."; exit 1; } ; else { echo "✅ Retrieved CSP region '$region' for cluster ID '$INPUT_commodore_cluster_id'."; } ; fi
+    env -i "csp_region=$region" >> "$OUTPUT"
+
+    echo "Extracting apps domain for cluster '${INPUT_commodore_cluster_id}'."
+    apps_domain=$(jq -n -r --argjson cluster "$cluster_json" '$cluster.dynamicFacts.talosAppsDomain')
+    echo "Fetching kubeconfig for cluster '${INPUT_commodore_cluster_id}' from 'https://kubeconfig.${apps_domain}'."
+    curl -fsSLo "${INPUT_commodore_cluster_id}.kubeconfig" \
+      "https://kubeconfig.${apps_domain}/kubeconfig"
+    env -i "talos_kubeconfig=./${INPUT_commodore_cluster_id}.kubeconfig" >> "$OUTPUT"
+    echo "✅ Got kubeconfig for '${INPUT_commodore_cluster_id}'."
+    export KUBECONFIG="${INPUT_commodore_cluster_id}.kubeconfig"
+    if ! kubectl get nodes --request-timeout=2s; then echo "❌ Unable to access cluster with downloaded kubeconfig, check manually."; else echo "✅ Cluster access works with downloaded kubeconfig."; fi
+
 - match: And I compile(?P<push> and push)? the cluster catalog
   description: |-
     This step compiles the catalog to ensure you have a local checkout of the cluster repository.
@@ -13,3 +68,23 @@ spells:
       commodore_args="--push"
     fi
     commodore catalog compile "${INPUT_commodore_cluster_id}" ${commodore_args}
+
+- match: And I extract the cluster's base domain from the cluster inventory
+  description: |-
+    Extract the cluster's base domain from the cluster inventory.
+  inputs:
+  - name: commodore_tenant_id
+  outputs:
+  - name: base_domain
+  run: |
+    set -euo pipefail
+
+    if [ ! -d "inventory/classes/${INPUT_commodore_tenant_id}" ]; then
+      echo "❌ Expected current working directory to be a Commodore working directory for the target cluster."
+      exit 1
+    fi
+
+    base_domain=$(kapitan inventory --inventory-backend=reclass-rs -t cluster |\
+      yq '.parameters.talos.baseDomain')
+    if test -z "$base_domain" || test "$base_domain" == "null"; then echo "❌ Failed to extract base domain from cluster inventory."; else echo "✅ Extracted base domain '${base_domain}' from cluster inventory."; fi
+    env -i "base_domain=$base_domain" >> "$OUTPUT"

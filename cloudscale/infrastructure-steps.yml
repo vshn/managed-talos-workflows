@@ -482,3 +482,23 @@ spells:
 
     mc rb "${INPUT_commodore_cluster_id}/${INPUT_commodore_cluster_id}-bootstrap/" --force
     echo "✅ Deleted bootstrap S3 bucket."
+
+- match: And I extract the cloudscale API token from Vault
+  inputs:
+    - name: commodore_cluster_id
+    - name: commodore_tenant_id
+    - name: vault_address
+    - name: vault_login_method
+  outputs:
+    - name: cloudscale_token
+      type: sensitive
+  run: |
+    set -euo pipefail
+
+    export VAULT_ADDR="${INPUT_vault_address}"
+    vault login -method="${INPUT_vault_login_method}"
+
+    cloudscale_token=$(vault kv get -format=json \
+      "clusters/kv/${INPUT_commodore_tenant_id}/${INPUT_commodore_cluster_id}/cloudscale" | \
+      jq -r '.data.data.token')
+    env -i "cloudscale_token=${cloudscale_token}" >> "$OUTPUT"
