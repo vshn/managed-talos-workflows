@@ -25,5 +25,6 @@ And I delete the cloudscale S3 buckets
 And I delete the cluster backups and cloudscale objects user
 And I delete the cluster's API token
 Then I delete the cluster's Vault secrets
+And I remove the cluster's DNS records
 And I delete the cluster from Lieutenant
 And I delete the Keycloak service
